@@ -32,8 +32,12 @@ KOSPI_SYMBOL = "KOSPI"
 LOOKBACK_DAYS = 600  # ma150·52주 신고가 계산에 필요한 여유 기간
 MA_WINDOWS = (10, 20, 30, 50, 100, 150)
 RS_WINDOWS = (20, 50)
-SLEEP_SEC = 1  # API 부하 방지: 섹터 1개 처리마다 1초
+SLEEP_SEC = 1  # API 부하 방지: 종목 50개 처리마다 1초
+SLEEP_EVERY = 50
 MAX_RETRY = 3
+
+GIT_USER_NAME = "okauto84"
+GIT_USER_EMAIL = "okauto84@gmail.com"
 
 ROW_PATTERN = re.compile(r'\["(\d{8})",([^\]]*)\]')
 
@@ -186,6 +190,8 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
             except RuntimeError:
                 summary["failed"] += 1
             processed += 1
+            if processed % SLEEP_EVERY == 0:
+                time.sleep(SLEEP_SEC)
 
         out_file = OUT_DIR / safe_filename(sector)
         with out_file.open("w", encoding="utf-8") as f:
@@ -215,10 +221,18 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
                     **summary,
                 }
             )
-        time.sleep(SLEEP_SEC)
 
     summary["elapsed"] = round(time.time() - started, 1)
     return summary
+
+
+def _secret(name: str) -> str:
+    """설정값을 st.secrets에서 읽고, 없으면 환경변수로 대체한다."""
+    try:
+        value = st.secrets.get(name, "")
+    except Exception:  # secrets.toml이 없으면 환경변수만 사용한다
+        value = ""
+    return str(value or os.environ.get(name, "")).strip()
 
 
 def _run_git(*args: str, token: str = "") -> subprocess.CompletedProcess:
@@ -250,7 +264,19 @@ def push_to_github(token: str, message: str) -> tuple[bool, str]:
     if added.returncode != 0:
         return False, added.stderr.strip()
 
-    committed = _run_git("commit", "-m", message, "--", target, token=token)
+    # 배포 환경에는 git user 설정이 없어 커밋이 실패하므로 identity를 직접 지정한다
+    committed = _run_git(
+        "-c",
+        f"user.name={_secret('GIT_USER_NAME') or GIT_USER_NAME}",
+        "-c",
+        f"user.email={_secret('GIT_USER_EMAIL') or GIT_USER_EMAIL}",
+        "commit",
+        "-m",
+        message,
+        "--",
+        target,
+        token=token,
+    )
     if committed.returncode != 0:
         return False, committed.stderr.strip() or committed.stdout.strip()
 
@@ -270,11 +296,7 @@ def push_to_github(token: str, message: str) -> tuple[bool, str]:
 
 def github_token() -> str:
     """GITHUB_TOKEN을 st.secrets에서 읽고, 없으면 환경변수로 대체한다."""
-    try:
-        token = st.secrets.get("GITHUB_TOKEN", "")
-    except Exception:  # secrets.toml이 없으면 환경변수만 사용한다
-        token = ""
-    return str(token or os.environ.get("GITHUB_TOKEN", "")).strip()
+    return _secret("GITHUB_TOKEN")
 
 
 def _run_update(trading_days: int, token: str) -> dict:
