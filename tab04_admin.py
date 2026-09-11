@@ -1,4 +1,4 @@
-"""컨트롤 탭: ETF 지표를 섹터별 JSON으로 갱신하고 GitHub에 push한다."""
+"""컨트롤 탭: ETF·주식 지표를 섹터별 JSON으로 갱신하고 GitHub에 push한다."""
 
 import json
 import os
@@ -14,7 +14,30 @@ import streamlit as st
 
 BASE_DIR = Path(__file__).resolve().parent
 ETF_LIST_FILE = BASE_DIR / "data" / "stock" / "030_EtfList.json"
-OUT_DIR = BASE_DIR / "data" / "values" / "etf"
+STOCK_LIST_FILE = BASE_DIR / "data" / "stock" / "020_StockList.json"
+ETF_OUT_DIR = BASE_DIR / "data" / "values" / "etf"
+STOCK_OUT_DIR = BASE_DIR / "data" / "values" / "stock"
+
+JOBS = {
+    "etf": {
+        "label": "ETF data update",
+        "unit": "ETF",
+        "list_file": ETF_LIST_FILE,
+        "out_dir": ETF_OUT_DIR,
+        "commit": "ETF values update",
+        # EtfList에만 있는 구성 종목 목록
+        "extra_fields": ("itemlist",),
+    },
+    "stock": {
+        "label": "KS-KQ data update",
+        "unit": "주식",
+        "list_file": STOCK_LIST_FILE,
+        "out_dir": STOCK_OUT_DIR,
+        "commit": "KS-KQ values update",
+        # StockList에만 있는 시장 구분(KS·KQ)과 시가총액
+        "extra_fields": ("stock", "marketsum"),
+    },
+}
 
 SISE_URL = (
     "https://api.finance.naver.com/siseJson.naver"
@@ -89,13 +112,27 @@ def high_52weeks(dates: list[str], closes: list[float], end_index: int) -> float
     return round(max(window), 2) if window else 0.0
 
 
+def item_fields(item: dict, extra_fields: tuple[str, ...]) -> dict:
+    """목록 파일에서 레코드로 그대로 옮길 종목 정보를 뽑는다."""
+    fields = {key: item.get(key, "") for key in extra_fields}
+    if "itemlist" in fields:
+        fields["itemlist"] = item.get("itemlist", [])
+    if "marketsum" in fields:  # 억원 단위 문자열이라 숫자로 바꿔 저장한다
+        try:
+            fields["marketsum"] = float(fields["marketsum"])
+        except (TypeError, ValueError):
+            fields["marketsum"] = 0.0
+    return fields
+
+
 def build_records(
-    etf: dict,
+    item: dict,
     series: list[tuple[str, float, int]],
     kospi_close_by_date: dict[str, float],
     base_dates: list[str],
+    extra_fields: tuple[str, ...] = (),
 ) -> list[dict]:
-    """ETF 한 종목에 대해 기준일별 지표 레코드를 만든다."""
+    """한 종목에 대해 기준일별 지표 레코드를 만든다."""
     dates = [row[0] for row in series]
     closes = [row[1] for row in series]
     volumes = [row[2] for row in series]
@@ -108,6 +145,7 @@ def build_records(
     ]
 
     latest_base_date = base_dates[-1]
+    carried = item_fields(item, extra_fields)
     records = []
     for base_date in base_dates:
         position = index_by_date.get(base_date)
@@ -115,12 +153,12 @@ def build_records(
             continue
 
         record = {
-            "itemcode": etf["itemcode"],
-            "itemname": etf["itemname"],
-            "itemlist": etf.get("itemlist", []),
-            "sectorcode": etf["sectorcode"],
-            "sector": etf["sector"],
-            "sectorlist": etf["sectorlist"],
+            "itemcode": item["itemcode"],
+            "itemname": item["itemname"],
+            **carried,
+            "sectorcode": item["sectorcode"],
+            "sector": item["sector"],
+            "sectorlist": item["sectorlist"],
             "date": base_date,
             "value": closes[position],
             "proc": volumes[position],
@@ -143,9 +181,15 @@ def safe_filename(sector: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "-", sector) + ".json"
 
 
-def update_etf_values(trading_days: int, progress=None) -> dict:
-    """기준일 수만큼 ETF 지표를 계산해 섹터별 JSON으로 저장한다."""
-    etfs = json.loads(ETF_LIST_FILE.read_text(encoding="utf-8"))
+def update_values(
+    list_file: Path,
+    out_dir: Path,
+    trading_days: int,
+    extra_fields: tuple[str, ...] = (),
+    progress=None,
+) -> dict:
+    """기준일 수만큼 목록 파일의 종목 지표를 계산해 섹터별 JSON으로 저장한다."""
+    items = json.loads(list_file.read_text(encoding="utf-8"))
 
     kospi_series = fetch_daily(KOSPI_SYMBOL)
     kospi_close_by_date = {day: close for day, close, _ in kospi_series}
@@ -153,17 +197,17 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
     base_dates = [day for day, _, _ in kospi_series][-max(1, trading_days) :]
 
     sectors: dict[str, list[dict]] = {}
-    for etf in etfs:
-        sectors.setdefault(etf["sector"], []).append(etf)
+    for item in items:
+        sectors.setdefault(item["sector"], []).append(item)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
     summary = {
         "base_dates": base_dates,
         "files": [],
         "records": 0,
         "failed": 0,
-        "etfs": len(etfs),
+        "items": len(items),
         "sectors": len(sectors),
         "elapsed": 0.0,
     }
@@ -183,17 +227,21 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
             )
 
         records = []
-        for etf in members:
+        for item in members:
             try:
-                series = fetch_daily(etf["itemcode"])
-                records.extend(build_records(etf, series, kospi_close_by_date, base_dates))
+                series = fetch_daily(item["itemcode"])
+                records.extend(
+                    build_records(
+                        item, series, kospi_close_by_date, base_dates, extra_fields
+                    )
+                )
             except RuntimeError:
                 summary["failed"] += 1
             processed += 1
             if processed % SLEEP_EVERY == 0:
                 time.sleep(SLEEP_SEC)
 
-        out_file = OUT_DIR / safe_filename(sector)
+        out_file = out_dir / safe_filename(sector)
         with out_file.open("w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
             f.write("\n")
@@ -202,7 +250,7 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
             {
                 "섹터": sector,
                 "파일": out_file.name,
-                "ETF": len(members),
+                "종목": len(members),
                 "레코드": len(records),
             }
         )
@@ -250,9 +298,9 @@ def _run_git(*args: str, token: str = "") -> subprocess.CompletedProcess:
     return result
 
 
-def push_to_github(token: str, message: str) -> tuple[bool, str]:
-    """data/values/etf 변경분만 커밋해 origin으로 push한다."""
-    target = str(OUT_DIR.relative_to(BASE_DIR)).replace("\\", "/")
+def push_to_github(token: str, message: str, out_dir: Path) -> tuple[bool, str]:
+    """저장 폴더의 변경분만 커밋해 origin으로 push한다."""
+    target = str(out_dir.relative_to(BASE_DIR)).replace("\\", "/")
 
     status = _run_git("status", "--porcelain", "--", target, token=token)
     if status.returncode != 0:
@@ -299,35 +347,43 @@ def github_token() -> str:
     return _secret("GITHUB_TOKEN")
 
 
-def _run_update(trading_days: int, token: str) -> dict:
+def _run_update(job_key: str, trading_days: int, token: str) -> dict:
     """진행 상황을 실시간으로 그리면서 갱신과 push를 수행한다."""
+    job = JOBS[job_key]
     progress_bar = st.progress(0.0, text="시작하는 중…")
     log_area = st.empty()
     log_lines: list[str] = []
 
     def on_progress(event: dict) -> None:
-        ratio = event["processed"] / max(1, event["etfs"])
+        ratio = event["processed"] / max(1, event["items"])
         if event["stage"] == "start":
             progress_bar.progress(
                 ratio,
                 text=f"[{event['order']}/{event['sectors']}] {event['sector']} 수집 중 "
-                f"(ETF {event['members']}종목)",
+                f"({job['unit']} {event['members']}종목)",
             )
             return
         progress_bar.progress(
             ratio,
             text=f"[{event['order']}/{event['sectors']}] {event['sector']} 완료 "
-            f"({event['processed']}/{event['etfs']} 종목, {event['elapsed']}초)",
+            f"({event['processed']}/{event['items']} 종목, {event['elapsed']}초)",
         )
         log_lines.append(
             f"[{event['order']:>2}/{event['sectors']}] {event['sector']:<8} "
-            f"ETF {event['members']:>4}종목 → {event['records']:>5}건  ({event['elapsed']}초)"
+            f"{job['unit']} {event['members']:>4}종목 → {event['records']:>5}건  "
+            f"({event['elapsed']}초)"
         )
         log_area.code("\n".join(log_lines), language="text")
 
-    result: dict = {"ok": False}
+    result: dict = {"ok": False, "job": job_key}
     try:
-        result["summary"] = update_etf_values(trading_days, progress=on_progress)
+        result["summary"] = update_values(
+            job["list_file"],
+            job["out_dir"],
+            trading_days,
+            job["extra_fields"],
+            progress=on_progress,
+        )
         result["ok"] = True
     except Exception as error:  # 수집 실패 원인을 UI에 그대로 노출한다
         result["error"] = str(error)
@@ -339,7 +395,9 @@ def _run_update(trading_days: int, token: str) -> dict:
     if token:
         with st.spinner("GitHub에 push 하는 중입니다…"):
             pushed, detail = push_to_github(
-                token, f"ETF values update {result['summary']['base_dates'][-1]}"
+                token,
+                f"{job['commit']} {result['summary']['base_dates'][-1]}",
+                job["out_dir"],
             )
         result["push"] = {"ok": pushed, "detail": detail}
     return result
@@ -347,18 +405,19 @@ def _run_update(trading_days: int, token: str) -> dict:
 
 def _render_result(result: dict) -> None:
     """마지막 실행 결과를 요약 지표와 표로 출력한다."""
+    job = JOBS[result.get("job", "etf")]
     if not result.get("ok"):
-        st.error(f"ETF data update 실패 — {result.get('error', '알 수 없는 오류')}")
+        st.error(f"{job['label']} 실패 — {result.get('error', '알 수 없는 오류')}")
         return
 
     summary = result["summary"]
     st.success(
-        f"ETF data update 완료 — 기준일 {summary['base_dates'][0]} ~ {summary['base_dates'][-1]}"
+        f"{job['label']} 완료 — 기준일 {summary['base_dates'][0]} ~ {summary['base_dates'][-1]}"
     )
 
     columns = st.columns(5)
     columns[0].metric("섹터", f"{summary['sectors']}개")
-    columns[1].metric("ETF", f"{summary['etfs']}종목")
+    columns[1].metric(job["unit"], f"{summary['items']}종목")
     columns[2].metric("레코드", f"{summary['records']:,}건")
     columns[3].metric("실패", f"{summary['failed']}종목")
     columns[4].metric("소요 시간", f"{summary['elapsed']}초")
@@ -366,7 +425,7 @@ def _render_result(result: dict) -> None:
     if summary["failed"]:
         st.warning(f"{summary['failed']}개 종목은 시세 조회에 실패해 제외했습니다.")
 
-    st.caption(f"저장 위치: {OUT_DIR}")
+    st.caption(f"저장 위치: {job['out_dir']}")
     st.dataframe(summary["files"], width="stretch", hide_index=True)
 
     push = result.get("push")
@@ -381,11 +440,11 @@ def _render_result(result: dict) -> None:
 def show() -> None:
     st.subheader("컨트롤")
     st.caption(
-        "기준 숫자만큼의 최근 거래일에 대해 ETF 지표를 계산하고 섹터별 JSON으로 저장합니다. "
+        "기준 숫자만큼의 최근 거래일에 대해 지표를 계산하고 섹터별 JSON으로 저장합니다. "
         "오늘(가장 최근 거래일)은 항상 포함됩니다."
     )
 
-    input_col, button_col, _ = st.columns([2, 2, 1], vertical_alignment="bottom")
+    input_col, etf_col, stock_col, _ = st.columns([2, 2, 2, 1], vertical_alignment="bottom")
     with input_col:
         trading_days = st.number_input(
             "기준 숫자 (오늘 포함 최근 거래일 수)",
@@ -395,17 +454,21 @@ def show() -> None:
             step=1,
             key="admin_trading_days",
         )
-    with button_col:
-        update_clicked = st.button("ETF data update", type="primary")
+    with etf_col:
+        etf_clicked = st.button(JOBS["etf"]["label"], type="primary")
+    with stock_col:
+        stock_clicked = st.button(JOBS["stock"]["label"], type="primary")
 
-    if update_clicked:
-        if not ETF_LIST_FILE.exists():
-            st.error(f"ETF 목록 파일이 없습니다: {ETF_LIST_FILE}")
+    job_key = "etf" if etf_clicked else "stock" if stock_clicked else ""
+    if job_key:
+        job = JOBS[job_key]
+        if not job["list_file"].exists():
+            st.error(f"목록 파일이 없습니다: {job['list_file']}")
             return
-        with st.status("ETF 데이터를 갱신하는 중입니다…", expanded=True) as status:
-            result = _run_update(int(trading_days), github_token())
+        with st.status(f"{job['label']} 진행 중입니다…", expanded=True) as status:
+            result = _run_update(job_key, int(trading_days), github_token())
             status.update(
-                label="ETF data update 완료" if result.get("ok") else "ETF data update 실패",
+                label=f"{job['label']} {'완료' if result.get('ok') else '실패'}",
                 state="complete" if result.get("ok") else "error",
             )
         st.session_state["admin_last_result"] = result

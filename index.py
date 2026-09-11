@@ -28,9 +28,19 @@ st.markdown(
         line-height: 2.2rem;
         margin: 0;
         white-space: nowrap;
+        color: #e03131 !important;
     }
     div[data-testid="stHorizontalBlock"] {
         align-items: center;
+    }
+    div[role="radiogroup"] label {
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 2px 10px;
+    }
+    div[role="radiogroup"] label:has(input:checked) {
+        border-color: #d9d9d9;
+        background-color: rgba(0, 0, 0, 0.03);
     }
     </style>
     """,
