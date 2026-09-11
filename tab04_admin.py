@@ -153,30 +153,71 @@ def update_etf_values(trading_days: int, progress=None) -> dict:
         sectors.setdefault(etf["sector"], []).append(etf)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    summary = {"base_dates": base_dates, "files": [], "records": 0, "failed": 0}
+    started = time.time()
+    summary = {
+        "base_dates": base_dates,
+        "files": [],
+        "records": 0,
+        "failed": 0,
+        "etfs": len(etfs),
+        "sectors": len(sectors),
+        "elapsed": 0.0,
+    }
 
+    processed = 0
     for order, (sector, members) in enumerate(sorted(sectors.items()), start=1):
+        if progress is not None:
+            progress(
+                {
+                    "stage": "start",
+                    "order": order,
+                    "sector": sector,
+                    "members": len(members),
+                    "processed": processed,
+                    **summary,
+                }
+            )
+
         records = []
         for etf in members:
             try:
                 series = fetch_daily(etf["itemcode"])
+                records.extend(build_records(etf, series, kospi_close_by_date, base_dates))
             except RuntimeError:
                 summary["failed"] += 1
-                continue
-            records.extend(build_records(etf, series, kospi_close_by_date, base_dates))
+            processed += 1
 
         out_file = OUT_DIR / safe_filename(sector)
         with out_file.open("w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
             f.write("\n")
 
-        summary["files"].append({"sector": sector, "file": out_file.name, "records": len(records)})
+        summary["files"].append(
+            {
+                "섹터": sector,
+                "파일": out_file.name,
+                "ETF": len(members),
+                "레코드": len(records),
+            }
+        )
         summary["records"] += len(records)
+        summary["elapsed"] = round(time.time() - started, 1)
 
         if progress is not None:
-            progress(order, len(sectors), sector, len(records))
+            progress(
+                {
+                    "stage": "done",
+                    "order": order,
+                    "sector": sector,
+                    "members": len(members),
+                    "records": len(records),
+                    "processed": processed,
+                    **summary,
+                }
+            )
         time.sleep(SLEEP_SEC)
 
+    summary["elapsed"] = round(time.time() - started, 1)
     return summary
 
 
@@ -227,65 +268,123 @@ def push_to_github(token: str, message: str) -> tuple[bool, str]:
     return True, f"{branch} 브랜치로 push 완료: {committed.stdout.strip().splitlines()[0]}"
 
 
-def show() -> None:
-    st.subheader("컨트롤")
+def _run_update(trading_days: int, github_token: str) -> dict:
+    """진행 상황을 실시간으로 그리면서 갱신과 push를 수행한다."""
+    progress_bar = st.progress(0.0, text="시작하는 중…")
+    log_area = st.empty()
+    log_lines: list[str] = []
 
-    trading_days = st.number_input(
-        "기준 숫자 (오늘 포함 거래일 수)",
-        min_value=1,
-        max_value=120,
-        value=3,
-        step=1,
-    )
-    github_token = st.text_input(
-        "GITHUB_TOKEN",
-        value=os.environ.get("GITHUB_TOKEN", ""),
-        type="password",
-        help="비워두면 JSON 생성까지만 진행합니다.",
-    )
-
-    if not st.button("ETF data update"):
-        return
-
-    if not ETF_LIST_FILE.exists():
-        st.error(f"ETF 목록 파일이 없습니다: {ETF_LIST_FILE}")
-        return
-
-    status_area = st.empty()
-    progress_bar = st.progress(0.0)
-
-    def on_progress(order: int, total: int, sector: str, count: int) -> None:
-        progress_bar.progress(order / total)
-        status_area.write(f"[{order}/{total}] {sector} — {count}건 저장")
-
-    with st.spinner("ETF 데이터를 갱신하는 중입니다."):
-        try:
-            summary = update_etf_values(int(trading_days), progress=on_progress)
-        except Exception as error:  # 수집 실패 시 UI에 그대로 노출한다
-            progress_bar.empty()
-            st.error(f"ETF data update 실패: {error}")
+    def on_progress(event: dict) -> None:
+        ratio = event["processed"] / max(1, event["etfs"])
+        if event["stage"] == "start":
+            progress_bar.progress(
+                ratio,
+                text=f"[{event['order']}/{event['sectors']}] {event['sector']} 수집 중 "
+                f"(ETF {event['members']}종목)",
+            )
             return
+        progress_bar.progress(
+            ratio,
+            text=f"[{event['order']}/{event['sectors']}] {event['sector']} 완료 "
+            f"({event['processed']}/{event['etfs']} 종목, {event['elapsed']}초)",
+        )
+        log_lines.append(
+            f"[{event['order']:>2}/{event['sectors']}] {event['sector']:<8} "
+            f"ETF {event['members']:>4}종목 → {event['records']:>5}건  ({event['elapsed']}초)"
+        )
+        log_area.code("\n".join(log_lines), language="text")
 
-    progress_bar.progress(1.0)
+    result: dict = {"ok": False}
+    try:
+        result["summary"] = update_etf_values(trading_days, progress=on_progress)
+        result["ok"] = True
+    except Exception as error:  # 수집 실패 원인을 UI에 그대로 노출한다
+        result["error"] = str(error)
+        progress_bar.empty()
+        return result
+
+    progress_bar.progress(1.0, text="갱신 완료")
+
+    if github_token:
+        with st.spinner("GitHub에 push 하는 중입니다…"):
+            pushed, detail = push_to_github(
+                github_token, f"ETF values update {result['summary']['base_dates'][-1]}"
+            )
+        result["push"] = {"ok": pushed, "detail": detail}
+    return result
+
+
+def _render_result(result: dict) -> None:
+    """마지막 실행 결과를 요약 지표와 표로 출력한다."""
+    if not result.get("ok"):
+        st.error(f"ETF data update 실패 — {result.get('error', '알 수 없는 오류')}")
+        return
+
+    summary = result["summary"]
     st.success(
-        f"ETF data update 완료 — 기준일 {summary['base_dates'][0]}~{summary['base_dates'][-1]}, "
-        f"{len(summary['files'])}개 섹터 / {summary['records']}건 저장"
+        f"ETF data update 완료 — 기준일 {summary['base_dates'][0]} ~ {summary['base_dates'][-1]}"
     )
+
+    columns = st.columns(5)
+    columns[0].metric("섹터", f"{summary['sectors']}개")
+    columns[1].metric("ETF", f"{summary['etfs']}종목")
+    columns[2].metric("레코드", f"{summary['records']:,}건")
+    columns[3].metric("실패", f"{summary['failed']}종목")
+    columns[4].metric("소요 시간", f"{summary['elapsed']}초")
+
     if summary["failed"]:
         st.warning(f"{summary['failed']}개 종목은 시세 조회에 실패해 제외했습니다.")
-    st.dataframe(summary["files"], width="stretch")
 
-    if not github_token:
+    st.caption(f"저장 위치: {OUT_DIR}")
+    st.dataframe(summary["files"], width="stretch", hide_index=True)
+
+    push = result.get("push")
+    if push is None:
         st.info("GITHUB_TOKEN이 비어 있어 push를 건너뛰었습니다.")
-        return
+    elif push["ok"]:
+        st.success(f"GitHub push 성공 — {push['detail']}")
+    else:
+        st.error(f"GitHub push 실패 — {push['detail']}")
 
-    with st.spinner("GitHub에 push 하는 중입니다."):
-        ok, detail = push_to_github(
-            github_token,
-            f"ETF values update {summary['base_dates'][-1]}",
+
+def show() -> None:
+    st.subheader("컨트롤")
+    st.caption(
+        "기준 숫자만큼의 최근 거래일에 대해 ETF 지표를 계산하고 섹터별 JSON으로 저장합니다. "
+        "오늘(가장 최근 거래일)은 항상 포함됩니다."
+    )
+
+    input_col, token_col = st.columns([1, 3], gap="medium")
+    with input_col:
+        trading_days = st.number_input(
+            "기준 숫자 (오늘 포함 거래일 수)",
+            min_value=1,
+            max_value=120,
+            value=3,
+            step=1,
+            key="admin_trading_days",
+        )
+    with token_col:
+        github_token = st.text_input(
+            "GITHUB_TOKEN",
+            value=os.environ.get("GITHUB_TOKEN", ""),
+            type="password",
+            help="비워두면 JSON 생성까지만 진행하고 push는 건너뜁니다.",
+            key="admin_github_token",
         )
 
-    if ok:
-        st.success(f"GitHub push 성공 — {detail}")
-    else:
-        st.error(f"GitHub push 실패 — {detail}")
+    if st.button("ETF data update", type="primary"):
+        if not ETF_LIST_FILE.exists():
+            st.error(f"ETF 목록 파일이 없습니다: {ETF_LIST_FILE}")
+            return
+        with st.status("ETF 데이터를 갱신하는 중입니다…", expanded=True) as status:
+            result = _run_update(int(trading_days), github_token.strip())
+            status.update(
+                label="ETF data update 완료" if result.get("ok") else "ETF data update 실패",
+                state="complete" if result.get("ok") else "error",
+            )
+        st.session_state["admin_last_result"] = result
+
+    if "admin_last_result" in st.session_state:
+        st.divider()
+        _render_result(st.session_state["admin_last_result"])
