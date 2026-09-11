@@ -1,0 +1,98 @@
+import json
+from pathlib import Path
+
+SECTORS = [
+    {
+        "sectorcode": "semiconductor",
+        "sector": "반도체",
+        "sectorlist": ["메모리", "반도체 소재", "반도체 장비", "비메모리", "팹리스", "테스트소켓"],
+    },
+    {
+        "sectorcode": "energy",
+        "sector": "전력/에너지",
+        "sectorlist": ["원자력", "전력기기", "신재생"],
+    },
+    {
+        "sectorcode": "infra",
+        "sector": "인프라",
+        "sectorlist": ["건설", "통신", "유틸리티", "건자재"],
+    },
+    {
+        "sectorcode": "it",
+        "sector": "IT/플랫폼",
+        "sectorlist": ["SW/AI", "인터넷", "플랫폼", "게임"],
+    },
+    {
+        "sectorcode": "bio",
+        "sector": "바이오",
+        "sectorlist": ["바이오신약", "제약", "의료기기", "CDMO"],
+    },
+    {
+        "sectorcode": "chemistry",
+        "sector": "화학/소재",
+        "sectorlist": ["정유", "화학", "철강", "비철"],
+    },
+    {
+        "sectorcode": "shipping",
+        "sector": "조선/해운",
+        "sectorlist": ["조선", "조선기자재", "해운"],
+    },
+    {
+        "sectorcode": "battery",
+        "sector": "2차전지",
+        "sectorlist": ["배터리셀", "양극재", "전지장비", "음극재", "소재"],
+    },
+    {
+        "sectorcode": "machine",
+        "sector": "기계",
+        "sectorlist": ["로봇", "자동화", "산업기계"],
+    },
+    {
+        "sectorcode": "finance",
+        "sector": "금융",
+        "sectorlist": ["은행", "보험", "증권", "리츠", "부동산"],
+    },
+    {
+        "sectorcode": "culture",
+        "sector": "K-컬처",
+        "sectorlist": ["화장품", "미용기기", "엔터", "미디어"],
+    },
+    {
+        "sectorcode": "company",
+        "sector": "지주사",
+        "sectorlist": ["지주사"],
+    },
+    {
+        "sectorcode": "goods",
+        "sector": "소비재",
+        "sectorlist": ["유통", "음식료", "여행", "레저", "패션", "의류"],
+    },
+    {
+        "sectorcode": "automobile",
+        "sector": "자동차",
+        "sectorlist": ["자동차부품", "완성차", "타이어"],
+    },
+    {
+        "sectorcode": "defense",
+        "sector": "방산",
+        "sectorlist": ["방위산업", "우주항공"],
+    },
+    {
+        "sectorcode": "etc",
+        "sector": "기타",
+        "sectorlist": ["기타"],
+    },
+]
+
+
+def main() -> None:
+    out_path = Path(__file__).resolve().parents[1] / "stock" / "01_sectorlist.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(SECTORS, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print(f"created: {out_path}")
+
+
+if __name__ == "__main__":
+    main()
