@@ -52,7 +52,8 @@ HEADERS = {
 }
 
 KOSPI_SYMBOL = "KOSPI"
-LOOKBACK_DAYS = 600  # ma150·52주 신고가 계산에 필요한 여유 기간
+LOOKBACK_DAYS = 900  # 기준일 250거래일 + ma150 계산에 필요한 여유 기간
+MAX_TRADING_DAYS = 250  # 약 1년치 거래일
 MA_WINDOWS = (10, 20, 30, 50, 100, 150)
 RS_WINDOWS = (20, 50)
 SLEEP_SEC = 1  # API 부하 방지: 종목 50개 처리마다 1초
@@ -451,31 +452,28 @@ def _render_result(result: dict) -> None:
         st.error(f"GitHub push 실패 — {push['detail']}")
 
 
-def show() -> None:
-    st.subheader("컨트롤")
-    st.caption(
-        "기준 숫자만큼의 최근 거래일에 대해 지표를 계산하고 섹터별 JSON으로 저장합니다. "
-        "오늘(가장 최근 거래일)은 항상 포함됩니다."
-    )
+def _render_job(job_key: str) -> None:
+    """작업 하나의 입력·버튼·결과를 독립된 영역으로 그린다."""
+    job = JOBS[job_key]
+    state_key = f"admin_last_result_{job_key}"
 
-    input_col, etf_col, stock_col, _ = st.columns([2, 2, 2, 1], vertical_alignment="bottom")
+    st.markdown(f"**{job['label']}**")
+    st.caption(f"{job['list_file'].name} → {job['out_dir'].relative_to(BASE_DIR)}")
+
+    input_col, button_col, _ = st.columns([2, 2, 3], vertical_alignment="bottom")
     with input_col:
         trading_days = st.number_input(
-            "기준 숫자 (오늘 포함 최근 거래일 수)",
+            f"기준 숫자 (오늘 포함 최근 거래일 수, 최대 {MAX_TRADING_DAYS}일)",
             min_value=1,
-            max_value=120,
+            max_value=MAX_TRADING_DAYS,
             value=3,
             step=1,
-            key="admin_trading_days",
+            key=f"admin_trading_days_{job_key}",
         )
-    with etf_col:
-        etf_clicked = st.button(JOBS["etf"]["label"], type="primary")
-    with stock_col:
-        stock_clicked = st.button(JOBS["stock"]["label"], type="primary")
+    with button_col:
+        clicked = st.button(job["label"], type="primary", key=f"admin_run_{job_key}")
 
-    job_key = "etf" if etf_clicked else "stock" if stock_clicked else ""
-    if job_key:
-        job = JOBS[job_key]
+    if clicked:
         if not job["list_file"].exists():
             st.error(f"목록 파일이 없습니다: {job['list_file']}")
             return
@@ -485,8 +483,21 @@ def show() -> None:
                 label=f"{job['label']} {'완료' if result.get('ok') else '실패'}",
                 state="complete" if result.get("ok") else "error",
             )
-        st.session_state["admin_last_result"] = result
+        st.session_state[state_key] = result
 
-    if "admin_last_result" in st.session_state:
-        st.divider()
-        _render_result(st.session_state["admin_last_result"])
+    if state_key in st.session_state:
+        _render_result(st.session_state[state_key])
+
+
+def show() -> None:
+    st.subheader("컨트롤")
+    st.caption(
+        "기준 숫자만큼의 최근 거래일에 대해 지표를 계산하고 섹터별 JSON으로 저장합니다. "
+        "오늘(가장 최근 거래일)은 항상 포함됩니다."
+    )
+
+    # 두 작업의 실행 결과를 각각 유지하도록 컨테이너와 세션 키를 분리한다
+    with st.container(border=True):
+        _render_job("etf")
+    with st.container(border=True):
+        _render_job("stock")
