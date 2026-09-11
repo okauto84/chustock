@@ -363,16 +363,20 @@ def show() -> None:
         "오늘(가장 최근 거래일)은 항상 포함됩니다."
     )
 
-    trading_days = st.number_input(
-        "기준 숫자 (오늘 포함 거래일 수)",
-        min_value=1,
-        max_value=120,
-        value=3,
-        step=1,
-        key="admin_trading_days",
-    )
+    input_col, button_col = st.columns([3, 2], vertical_alignment="bottom")
+    with input_col:
+        trading_days = st.number_input(
+            "기준 숫자 (오늘 포함 최근 거래일 수)",
+            min_value=1,
+            max_value=120,
+            value=3,
+            step=1,
+            key="admin_trading_days",
+        )
+    with button_col:
+        update_clicked = st.button("ETF data update", type="primary")
 
-    if st.button("ETF data update", type="primary"):
+    if update_clicked:
         if not ETF_LIST_FILE.exists():
             st.error(f"ETF 목록 파일이 없습니다: {ETF_LIST_FILE}")
             return
