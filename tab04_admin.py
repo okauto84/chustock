@@ -363,7 +363,7 @@ def show() -> None:
         "오늘(가장 최근 거래일)은 항상 포함됩니다."
     )
 
-    input_col, button_col = st.columns([3, 2], vertical_alignment="bottom")
+    input_col, button_col, _ = st.columns([2, 2, 1], vertical_alignment="bottom")
     with input_col:
         trading_days = st.number_input(
             "기준 숫자 (오늘 포함 최근 거래일 수)",
