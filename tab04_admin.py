@@ -268,7 +268,16 @@ def push_to_github(token: str, message: str) -> tuple[bool, str]:
     return True, f"{branch} 브랜치로 push 완료: {committed.stdout.strip().splitlines()[0]}"
 
 
-def _run_update(trading_days: int, github_token: str) -> dict:
+def github_token() -> str:
+    """GITHUB_TOKEN을 st.secrets에서 읽고, 없으면 환경변수로 대체한다."""
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", "")
+    except Exception:  # secrets.toml이 없으면 환경변수만 사용한다
+        token = ""
+    return str(token or os.environ.get("GITHUB_TOKEN", "")).strip()
+
+
+def _run_update(trading_days: int, token: str) -> dict:
     """진행 상황을 실시간으로 그리면서 갱신과 push를 수행한다."""
     progress_bar = st.progress(0.0, text="시작하는 중…")
     log_area = st.empty()
@@ -305,10 +314,10 @@ def _run_update(trading_days: int, github_token: str) -> dict:
 
     progress_bar.progress(1.0, text="갱신 완료")
 
-    if github_token:
+    if token:
         with st.spinner("GitHub에 push 하는 중입니다…"):
             pushed, detail = push_to_github(
-                github_token, f"ETF values update {result['summary']['base_dates'][-1]}"
+                token, f"ETF values update {result['summary']['base_dates'][-1]}"
             )
         result["push"] = {"ok": pushed, "detail": detail}
     return result
@@ -340,7 +349,7 @@ def _render_result(result: dict) -> None:
 
     push = result.get("push")
     if push is None:
-        st.info("GITHUB_TOKEN이 비어 있어 push를 건너뛰었습니다.")
+        st.info("secrets에 GITHUB_TOKEN이 없어 push를 건너뛰었습니다.")
     elif push["ok"]:
         st.success(f"GitHub push 성공 — {push['detail']}")
     else:
@@ -354,31 +363,21 @@ def show() -> None:
         "오늘(가장 최근 거래일)은 항상 포함됩니다."
     )
 
-    input_col, token_col = st.columns([1, 3], gap="medium")
-    with input_col:
-        trading_days = st.number_input(
-            "기준 숫자 (오늘 포함 거래일 수)",
-            min_value=1,
-            max_value=120,
-            value=3,
-            step=1,
-            key="admin_trading_days",
-        )
-    with token_col:
-        github_token = st.text_input(
-            "GITHUB_TOKEN",
-            value=os.environ.get("GITHUB_TOKEN", ""),
-            type="password",
-            help="비워두면 JSON 생성까지만 진행하고 push는 건너뜁니다.",
-            key="admin_github_token",
-        )
+    trading_days = st.number_input(
+        "기준 숫자 (오늘 포함 거래일 수)",
+        min_value=1,
+        max_value=120,
+        value=3,
+        step=1,
+        key="admin_trading_days",
+    )
 
     if st.button("ETF data update", type="primary"):
         if not ETF_LIST_FILE.exists():
             st.error(f"ETF 목록 파일이 없습니다: {ETF_LIST_FILE}")
             return
         with st.status("ETF 데이터를 갱신하는 중입니다…", expanded=True) as status:
-            result = _run_update(int(trading_days), github_token.strip())
+            result = _run_update(int(trading_days), github_token())
             status.update(
                 label="ETF data update 완료" if result.get("ok") else "ETF data update 실패",
                 state="complete" if result.get("ok") else "error",
