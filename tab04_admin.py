@@ -61,8 +61,13 @@ MAX_RETRY = 3
 
 GIT_USER_NAME = "okauto84"
 GIT_USER_EMAIL = "okauto84@gmail.com"
+GITHUB_REPO = "okauto84/chustock"
 
 ROW_PATTERN = re.compile(r'\["(\d{8})",([^\]]*)\]')
+# https://host/owner/repo(.git), git@host:owner/repo(.git), ssh://git@host/owner/repo 모두 처리
+REMOTE_PATTERN = re.compile(
+    r"^(?:[a-z]+://)?(?:[^@/]+@)?(?P<host>[^/:]+)[/:](?P<path>[^\s]+?)(?:\.git)?/?$"
+)
 
 
 def fetch_daily(symbol: str) -> list[tuple[str, float, int]]:
@@ -298,6 +303,19 @@ def _run_git(*args: str, token: str = "") -> subprocess.CompletedProcess:
     return result
 
 
+def push_url(origin: str, token: str) -> str:
+    """origin 주소를 토큰이 붙은 https 주소로 바꾼다.
+
+    SSH 주소(git@github.com:owner/repo.git)를 그대로 쓰면 호스트 키가 없는 배포 환경에서
+    'Host key verification failed'로 실패하므로 항상 https로 변환한다.
+    """
+    matched = REMOTE_PATTERN.match(origin)
+    host, path = (matched.group("host"), matched.group("path")) if matched else ("", "")
+    if not path:  # origin이 없거나 형식을 못 읽으면 설정된 저장소로 push한다
+        host, path = "github.com", _secret("GITHUB_REPO") or GITHUB_REPO
+    return f"https://x-access-token:{token}@{host or 'github.com'}/{path}.git"
+
+
 def push_to_github(token: str, message: str, out_dir: Path) -> tuple[bool, str]:
     """저장 폴더의 변경분만 커밋해 origin으로 push한다."""
     target = str(out_dir.relative_to(BASE_DIR)).replace("\\", "/")
@@ -329,11 +347,7 @@ def push_to_github(token: str, message: str, out_dir: Path) -> tuple[bool, str]:
         return False, committed.stderr.strip() or committed.stdout.strip()
 
     remote = _run_git("remote", "get-url", "origin", token=token)
-    if remote.returncode != 0:
-        return False, remote.stderr.strip()
-    origin = remote.stdout.strip()
-    if origin.startswith("https://"):
-        origin = f"https://x-access-token:{token}@{origin.split('://', 1)[1].split('@')[-1]}"
+    origin = push_url(remote.stdout.strip() if remote.returncode == 0 else "", token)
 
     branch = _run_git("rev-parse", "--abbrev-ref", "HEAD", token=token).stdout.strip() or "main"
     pushed = _run_git("push", origin, f"HEAD:{branch}", token=token)
