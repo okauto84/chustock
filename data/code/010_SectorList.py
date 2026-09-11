@@ -86,7 +86,7 @@ SECTORS = [
 
 
 def main() -> None:
-    out_path = Path(__file__).resolve().parents[1] / "stock" / "01_sectorlist.json"
+    out_path = Path(__file__).resolve().parents[1] / "stock" / "01_SectorList.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(SECTORS, f, ensure_ascii=False, indent=2)

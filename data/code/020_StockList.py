@@ -20,8 +20,8 @@ PAGE_SIZE = 50
 SLEEP_SEC = 1  # API 부하 방지: 50건당 1초
 MAX_RETRY = 3
 
-SECTOR_FILE = Path(__file__).resolve().parents[1] / "stock" / "01_sectorlist.json"
-OUT_FILE = Path(__file__).resolve().parents[1] / "stock" / "02_stocklist.json"
+SECTOR_FILE = Path(__file__).resolve().parents[1] / "stock" / "010_SectorList.json"
+OUT_FILE = Path(__file__).resolve().parents[1] / "stock" / "020_StockList.json"
 
 # 네이버 업종명 -> (sectorcode, sectorlist)
 INDUSTRY_MAP = {
