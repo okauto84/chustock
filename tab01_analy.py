@@ -34,7 +34,8 @@ RS_FILTERS: dict[str, bool] = {
     "RS20>RS50": True,
 }
 
-# 라벨 -> 52주 신고가(Top52) 대비 허용하는 하락 폭
+# 라벨 -> 신고가(Top52) 대비 허용하는 하락률 상한
+# (Top52 - value) / Top52 이 이 값 이하면 조건 충족
 TOP52_FILTERS: dict[str, float | None] = {
     "전체": None,
     "5%": 0.05,
@@ -104,9 +105,9 @@ def load_etf_list(signature: tuple[float, int]) -> dict[str, dict]:
 
 
 @st.cache_data(show_spinner="종목 지표를 읽는 중입니다…")
-def load_latest_values(signature: tuple[int, float]) -> dict[str, dict]:
-    """itemcode -> 가장 최근 기준일 지표 레코드."""
-    latest: dict[str, dict] = {}
+def load_latest_values(signature: tuple[int, float]) -> tuple[str | None, dict[str, dict]]:
+    """전 종목 공통 최신 기준일과, 그 날짜 지표만 담은 itemcode -> 레코드."""
+    by_code: dict[str, dict] = {}
     for path in ETF_VALUE_DIR.glob("*.json"):
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -114,8 +115,14 @@ def load_latest_values(signature: tuple[int, float]) -> dict[str, dict]:
             continue
         rows = [row for row in loaded if isinstance(row, dict) and row.get("date")]
         if rows:
-            latest[path.stem] = max(rows, key=lambda row: row["date"])
-    return latest
+            by_code[path.stem] = max(rows, key=lambda row: row["date"])
+    if not by_code:
+        return None, {}
+    # 파일마다 마지막 날이 다를 수 있어, 검색은 그중 가장 늦은 날짜만 쓴다
+    as_of = max(row["date"] for row in by_code.values())
+    return as_of, {
+        itemcode: row for itemcode, row in by_code.items() if row["date"] == as_of
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -156,7 +163,11 @@ def passes_filters(
 
     if top52_ratio is not None:
         top52 = record.get("Top52") or 0.0
-        if top52 <= 0 or value < top52 * (1 - top52_ratio):
+        if top52 <= 0:
+            return False
+        # 신고가 대비 하락률: (Top52 - value) / Top52 이 선택한 % 이내인지 본다
+        # 예) value=100, Top52=120 → 16.67% → 20% 포함, 15% 제외
+        if (top52 - value) / top52 > top52_ratio:
             return False
 
     return True
@@ -197,7 +208,8 @@ def _grow_page(node: str) -> None:
 
 
 def _reset_tree() -> None:
-    """검색 버튼을 누르면 펼친 상태와 선택을 처음으로 돌린다."""
+    """검색 버튼을 누르면 최신 지표를 다시 읽고 펼친 상태·선택을 처음으로 돌린다."""
+    load_latest_values.clear()
     st.session_state[OPEN_KEY] = set()
     st.session_state[LIMIT_KEY] = {}
     st.session_state[PICK_KEY] = None
@@ -450,7 +462,7 @@ def _render_picked(etfs: dict[str, dict], holder_index: dict[str, list[str]]) ->
     holders = holder_index.get(name, [])
     st.divider()
     source = etfs.get(picked["itemcode"], {}).get("itemname", picked["itemcode"])
-    st.markdown(f"**구성 종목 · {name}** — {source} 에서 선택 / 포함 ETF {len(holders)}개")
+    st.markdown(f"**구성 종목 · {name}이 포함된 ETF 종목** — {source} 에서 선택 / 포함 ETF {len(holders)}개")
     st.dataframe(
         [
             {
@@ -473,7 +485,7 @@ def show() -> None:
     list_signature = _file_signature(ETF_LIST_FILE)
     categories = load_categories(category_signature)
     etfs = load_etf_list(list_signature)
-    values = load_latest_values(_dir_signature(ETF_VALUE_DIR))
+    as_of, values = load_latest_values(_dir_signature(ETF_VALUE_DIR))
 
     ma_col, rs_col, top52_col, button_col = st.columns(
         [3, 2, 2, 1], vertical_alignment="bottom"
@@ -500,7 +512,7 @@ def show() -> None:
         )
     with top52_col:
         top52_label = st.selectbox(
-            "신고가 비율",
+            "52주 신고가 비율",
             list(TOP52_FILTERS),
             key=TOP52_KEY,
             accept_new_options=False,
@@ -525,9 +537,10 @@ def show() -> None:
     )
     matched = sum(len(codes) for lists in tree.values() for codes in lists.values())
     total = sum(len(codes) for lists in categories.values() for codes in lists.values())
+    as_of_text = as_of or "없음"
     st.caption(
-        f"이동평균선 {ma_label} · RS지수 {rs_label} · 신고가 비율 {top52_label} "
-        f"→ {matched}/{total}종목"
+        f"기준일 {as_of_text} · 이동평균선 {ma_label} · RS지수 {rs_label} · "
+        f"신고가 비율 {top52_label} → {matched}/{total}종목"
     )
 
     with st.container(border=True):
