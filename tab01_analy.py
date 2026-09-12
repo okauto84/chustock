@@ -1,8 +1,371 @@
-"""분석 탭."""
+"""분석 탭: 이동평균·RS·신고가 조건으로 ETF를 걸러 트리 그리드로 보여준다."""
+
+import json
+from pathlib import Path
 
 import streamlit as st
+
+BASE_DIR = Path(__file__).resolve().parent
+CATEGORY_FILE = BASE_DIR / "data" / "stock" / "031_EtfCategorization.json"
+ETF_LIST_FILE = BASE_DIR / "data" / "stock" / "030_EtfList.json"
+ETF_VALUE_DIR = BASE_DIR / "data" / "values" / "etf"
+
+# 라벨 -> 종가 다음으로 이어서 비교할 이동평균 키(앞에서부터 큰 값이어야 조건 충족)
+MA_FILTERS: dict[str, tuple[str, ...]] = {
+    "전체": (),
+    "종가>MA10": ("ma10",),
+    "종가>MA10>MA20": ("ma10", "ma20"),
+    "종가>MA10>MA20>MA30": ("ma10", "ma20", "ma30"),
+    "종가>MA10>MA20>MA30>MA50": ("ma10", "ma20", "ma30", "ma50"),
+    "종가>MA10>MA20>MA30>MA50>MA100": ("ma10", "ma20", "ma30", "ma50", "ma100"),
+    "종가>MA10>MA20>MA30>MA50>MA100>MA150": (
+        "ma10",
+        "ma20",
+        "ma30",
+        "ma50",
+        "ma100",
+        "ma150",
+    ),
+}
+
+RS_FILTERS: dict[str, bool] = {
+    "전체": False,
+    "RS20>RS50": True,
+}
+
+# 라벨 -> 52주 신고가(Top52) 대비 허용하는 하락 폭
+TOP52_FILTERS: dict[str, float | None] = {
+    "전체": None,
+    "5%": 0.05,
+    "10%": 0.10,
+    "15%": 0.15,
+    "20%": 0.20,
+    "25%": 0.25,
+    "30%": 0.30,
+    "40%": 0.40,
+    "50%": 0.50,
+}
+
+GRID_RATIO = (3, 7)  # 트리(종목) : 구성 종목
+PAGE_SIZE = 30  # 한 분류에 ETF가 수백 개라 나눠 그린다
+
+MA_KEY = "analy_ma"
+RS_KEY = "analy_rs"
+TOP52_KEY = "analy_top52"
+OPEN_KEY = "analy_open_nodes"
+LIMIT_KEY = "analy_page_limits"
+PICK_KEY = "analy_picked_item"
+
+
+def _file_signature(path: Path) -> tuple[float, int]:
+    """파일이 바뀌면 캐시를 새로 읽도록 (수정시각, 크기)를 돌려준다."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0.0, 0)
+    return (stat.st_mtime, stat.st_size)
+
+
+def _dir_signature(directory: Path) -> tuple[int, float]:
+    """디렉터리 안 JSON의 (개수, 최신 수정시각)."""
+    times = [path.stat().st_mtime for path in directory.glob("*.json")]
+    return (len(times), max(times, default=0.0))
+
+
+@st.cache_data(show_spinner=False)
+def load_categories(signature: tuple[float, int]) -> dict[str, dict[str, list[str]]]:
+    """sector -> sectorlist -> itemcode[] 분류 트리."""
+    try:
+        loaded = json.loads(CATEGORY_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+@st.cache_data(show_spinner=False)
+def load_etf_list(signature: tuple[float, int]) -> dict[str, dict]:
+    """itemcode -> ETF 종목 정보(종목명·구성 종목)."""
+    try:
+        loaded = json.loads(ETF_LIST_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {
+        str(row["itemcode"]): row
+        for row in loaded
+        if isinstance(row, dict) and row.get("itemcode")
+    }
+
+
+@st.cache_data(show_spinner="종목 지표를 읽는 중입니다…")
+def load_latest_values(signature: tuple[int, float]) -> dict[str, dict]:
+    """itemcode -> 가장 최근 기준일 지표 레코드."""
+    latest: dict[str, dict] = {}
+    for path in ETF_VALUE_DIR.glob("*.json"):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):  # 깨진 파일은 건너뛴다
+            continue
+        rows = [row for row in loaded if isinstance(row, dict) and row.get("date")]
+        if rows:
+            latest[path.stem] = max(rows, key=lambda row: row["date"])
+    return latest
+
+
+@st.cache_data(show_spinner=False)
+def build_holder_index(signature: tuple[float, int]) -> dict[str, list[str]]:
+    """구성 종목명 -> 그 종목을 담고 있는 ETF itemcode[]."""
+    index: dict[str, list[str]] = {}
+    for itemcode, row in load_etf_list(signature).items():
+        for name in row.get("itemlist") or []:
+            index.setdefault(str(name), []).append(itemcode)
+    return index
+
+
+def passes_filters(
+    record: dict | None,
+    ma_keys: tuple[str, ...],
+    rs_only: bool,
+    top52_ratio: float | None,
+) -> bool:
+    """최근 지표 레코드가 세 콤보박스 조건을 모두 만족하는지 본다."""
+    if record is None:
+        return False
+
+    value = record.get("value") or 0.0
+    if value <= 0:
+        return False
+
+    if ma_keys:
+        averages = [record.get(key) or 0.0 for key in ma_keys]
+        # 상장 기간이 짧아 이동평균이 채워지지 않은 종목(0)은 비교 대상에서 뺀다
+        if any(average <= 0 for average in averages):
+            return False
+        chain = [value, *averages]
+        if any(upper <= lower for upper, lower in zip(chain, chain[1:])):
+            return False
+
+    if rs_only and (record.get("RS20") or 0.0) <= (record.get("RS50") or 0.0):
+        return False
+
+    if top52_ratio is not None:
+        top52 = record.get("Top52") or 0.0
+        if top52 <= 0 or value < top52 * (1 - top52_ratio):
+            return False
+
+    return True
+
+
+def filter_tree(
+    categories: dict[str, dict[str, list[str]]],
+    values: dict[str, dict],
+    ma_keys: tuple[str, ...],
+    rs_only: bool,
+    top52_ratio: float | None,
+) -> dict[str, dict[str, list[str]]]:
+    """조건을 만족하는 ETF만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
+    tree: dict[str, dict[str, list[str]]] = {}
+    for sector, sectorlists in categories.items():
+        kept_lists: dict[str, list[str]] = {}
+        for sectorlist, itemcodes in sectorlists.items():
+            kept = [
+                itemcode
+                for itemcode in itemcodes
+                if passes_filters(values.get(itemcode), ma_keys, rs_only, top52_ratio)
+            ]
+            if kept:
+                kept_lists[sectorlist] = kept
+        if kept_lists:
+            tree[sector] = kept_lists
+    return tree
+
+
+def _toggle_node(node: str) -> None:
+    opened: set[str] = st.session_state.setdefault(OPEN_KEY, set())
+    opened.symmetric_difference_update({node})
+
+
+def _grow_page(node: str) -> None:
+    limits: dict[str, int] = st.session_state.setdefault(LIMIT_KEY, {})
+    limits[node] = limits.get(node, PAGE_SIZE) + PAGE_SIZE
+
+
+def _reset_tree() -> None:
+    """검색 버튼을 누르면 펼친 상태와 선택을 처음으로 돌린다."""
+    st.session_state[OPEN_KEY] = set()
+    st.session_state[LIMIT_KEY] = {}
+    st.session_state[PICK_KEY] = None
+
+
+def _pick_holding(pills_key: str, itemcode: str) -> None:
+    picked = st.session_state.get(pills_key)
+    st.session_state[PICK_KEY] = (
+        {"name": picked, "itemcode": itemcode} if picked else None
+    )
+    # 다른 행에 남아 있는 선택을 지워 화면에 한 종목만 선택된 상태로 둔다
+    for key in list(st.session_state):
+        if str(key).startswith("analy_pills_") and key != pills_key:
+            st.session_state[key] = None
+
+
+def _render_branch(label: str, count: int, node: str, depth: int) -> bool:
+    """트리 분기 행을 그리고 펼쳐진 상태인지 돌려준다."""
+    opened: set[str] = st.session_state.setdefault(OPEN_KEY, set())
+    is_open = node in opened
+    tree_col, _ = st.columns(GRID_RATIO, vertical_alignment="center")
+    with tree_col:
+        st.button(
+            f"{'　' * depth}{'▾' if is_open else '▸'} {label} ({count})",
+            key=f"analy_node_{node}",
+            on_click=_toggle_node,
+            args=(node,),
+            type="tertiary",
+            width="stretch",
+        )
+    return is_open
+
+
+def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
+    """ETF 한 종목: 왼쪽은 종목명, 오른쪽은 구성 종목 박스."""
+    tree_col, holdings_col = st.columns(GRID_RATIO, vertical_alignment="center")
+    with tree_col:
+        itemname = item.get("itemname") or itemcode
+        st.markdown(
+            f"<div style='padding-left:2.6rem'>└ {itemname}"
+            f"<span style='color:#868e96'> · {itemcode}</span></div>",
+            unsafe_allow_html=True,
+        )
+        if record:
+            st.markdown(
+                f"<div style='padding-left:3.2rem;color:#868e96'>"
+                f"{record.get('date', '')} 종가 {record.get('value', 0):,.0f}</div>",
+                unsafe_allow_html=True,
+            )
+    with holdings_col:
+        holdings = [str(name) for name in item.get("itemlist") or []]
+        if not holdings:
+            st.caption("구성 종목 정보가 없습니다.")
+            return
+        pills_key = f"analy_pills_{itemcode}"
+        st.pills(
+            "구성 종목",
+            holdings,
+            selection_mode="single",
+            label_visibility="collapsed",
+            key=pills_key,
+            on_change=_pick_holding,
+            args=(pills_key, itemcode),
+        )
+
+
+def _render_tree(
+    tree: dict[str, dict[str, list[str]]],
+    etfs: dict[str, dict],
+    values: dict[str, dict],
+) -> None:
+    header_cols = st.columns(GRID_RATIO)
+    header_cols[0].markdown("**종목**")
+    header_cols[1].markdown("**구성 종목**")
+    st.divider()
+
+    if not tree:
+        st.info("조건을 만족하는 종목이 없습니다.")
+        return
+
+    limits: dict[str, int] = st.session_state.setdefault(LIMIT_KEY, {})
+    for sector, sectorlists in tree.items():
+        sector_total = sum(len(codes) for codes in sectorlists.values())
+        if not _render_branch(sector, sector_total, sector, depth=0):
+            continue
+
+        for sectorlist, itemcodes in sectorlists.items():
+            node = f"{sector}/{sectorlist}"
+            if not _render_branch(sectorlist, len(itemcodes), node, depth=1):
+                continue
+
+            limit = limits.get(node, PAGE_SIZE)
+            for itemcode in itemcodes[:limit]:
+                item = etfs.get(itemcode, {"itemcode": itemcode})
+                _render_leaf(itemcode, item, values.get(itemcode))
+
+            remaining = len(itemcodes) - limit
+            if remaining > 0:
+                st.button(
+                    f"　　남은 {remaining}종목 중 {min(remaining, PAGE_SIZE)}개 더 보기",
+                    key=f"analy_more_{node}",
+                    on_click=_grow_page,
+                    args=(node,),
+                    type="tertiary",
+                )
+
+
+def _render_picked(etfs: dict[str, dict], holder_index: dict[str, list[str]]) -> None:
+    """구성 종목 박스를 클릭했을 때 같은 종목을 담은 ETF를 보여준다."""
+    picked = st.session_state.get(PICK_KEY)
+    if not picked:
+        return
+
+    name = picked["name"]
+    holders = holder_index.get(name, [])
+    st.divider()
+    source = etfs.get(picked["itemcode"], {}).get("itemname", picked["itemcode"])
+    st.markdown(f"**구성 종목 · {name}** — {source} 에서 선택 / 포함 ETF {len(holders)}개")
+    st.dataframe(
+        [
+            {
+                "종목코드": itemcode,
+                "종목명": etfs.get(itemcode, {}).get("itemname", ""),
+                "섹터": etfs.get(itemcode, {}).get("sector", ""),
+                "분류": etfs.get(itemcode, {}).get("sectorlist", ""),
+            }
+            for itemcode in holders
+        ],
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def show() -> None:
     st.subheader("분석")
-    st.write("종목·섹터 분석 화면입니다.")
+
+    category_signature = _file_signature(CATEGORY_FILE)
+    list_signature = _file_signature(ETF_LIST_FILE)
+    categories = load_categories(category_signature)
+    etfs = load_etf_list(list_signature)
+    values = load_latest_values(_dir_signature(ETF_VALUE_DIR))
+
+    ma_col, rs_col, top52_col, button_col = st.columns(
+        [3, 2, 2, 1], vertical_alignment="bottom"
+    )
+    with ma_col:
+        ma_label = st.selectbox("이동평균선", list(MA_FILTERS), key=MA_KEY)
+    with rs_col:
+        rs_label = st.selectbox("RS지수", list(RS_FILTERS), key=RS_KEY)
+    with top52_col:
+        top52_label = st.selectbox("신고가 비율", list(TOP52_FILTERS), key=TOP52_KEY)
+    with button_col:
+        st.button(
+            "검색",
+            type="primary",
+            width="stretch",
+            on_click=_reset_tree,
+            key="analy_search",
+        )
+
+    tree = filter_tree(
+        categories,
+        values,
+        MA_FILTERS[ma_label],
+        RS_FILTERS[rs_label],
+        TOP52_FILTERS[top52_label],
+    )
+    matched = sum(len(codes) for lists in tree.values() for codes in lists.values())
+    total = sum(len(codes) for lists in categories.values() for codes in lists.values())
+    st.caption(
+        f"이동평균선 {ma_label} · RS지수 {rs_label} · 신고가 비율 {top52_label} "
+        f"→ {matched}/{total}종목"
+    )
+
+    with st.container(border=True):
+        _render_tree(tree, etfs, values)
+
+    _render_picked(etfs, build_holder_index(list_signature))
