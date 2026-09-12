@@ -27,6 +27,8 @@ JOBS = {
         "commit": "ETF values update",
         # EtfList에만 있는 구성 종목 목록
         "extra_fields": ("itemlist",),
+        # 종목 하나당 {itemcode}.json 한 개를 만들고 기준일 레코드를 병합한다
+        "layout": "item",
     },
     "stock": {
         "label": "KS-KQ data update",
@@ -36,6 +38,7 @@ JOBS = {
         "commit": "KS-KQ values update",
         # StockList에만 있는 시장 구분(KS·KQ)과 시가총액
         "extra_fields": ("stock", "marketsum"),
+        "layout": "sector",
     },
 }
 
@@ -185,6 +188,113 @@ def build_records(
 def safe_filename(sector: str) -> str:
     """'전력/에너지'처럼 경로 구분자가 들어간 섹터명을 파일명으로 바꾼다."""
     return re.sub(r'[\\/:*?"<>|]', "-", sector) + ".json"
+
+
+def merge_records(out_file: Path, records: list[dict]) -> list[dict]:
+    """기존 파일의 날짜는 남기고 이번에 계산한 기준일만 덮어써 날짜순으로 돌려준다."""
+    stored: list[dict] = []
+    if out_file.exists():
+        try:
+            loaded = json.loads(out_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):  # 깨진 파일은 새로 만든다
+            loaded = []
+        if isinstance(loaded, list):
+            stored = [row for row in loaded if isinstance(row, dict) and row.get("date")]
+
+    by_date = {row["date"]: row for row in stored}
+    by_date.update({row["date"]: row for row in records})
+    return [by_date[day] for day in sorted(by_date)]
+
+
+def update_item_values(
+    list_file: Path,
+    out_dir: Path,
+    trading_days: int,
+    extra_fields: tuple[str, ...] = (),
+    progress=None,
+) -> dict:
+    """기준일 수만큼 종목 지표를 계산해 {itemcode}.json 파일마다 병합 저장한다."""
+    items = json.loads(list_file.read_text(encoding="utf-8"))
+
+    kospi_series = fetch_daily(KOSPI_SYMBOL)
+    kospi_close_by_date = {day: close for day, close, _ in kospi_series}
+    # 오늘(가장 최근 거래일)을 반드시 포함한 최근 N 거래일
+    base_dates = [day for day, _, _ in kospi_series][-max(1, trading_days) :]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    summary = {
+        "layout": "item",
+        "base_dates": base_dates,
+        "files": [],
+        "records": 0,
+        "created": 0,
+        "updated": 0,
+        "failed": 0,
+        "items": len(items),
+        "sectors": 0,
+        "elapsed": 0.0,
+    }
+
+    by_sector: dict[str, dict] = {}
+    for processed, item in enumerate(items, start=1):
+        itemcode = str(item.get("itemcode", "")).strip()
+        sector = item.get("sector") or "기타"
+        stats = by_sector.setdefault(
+            sector,
+            {"섹터": sector, "종목": 0, "신규": 0, "갱신": 0, "레코드": 0, "실패": 0},
+        )
+        stats["종목"] += 1
+
+        added = 0
+        if itemcode:
+            out_file = out_dir / f"{itemcode}.json"
+            is_new = not out_file.exists()
+            try:
+                series = fetch_daily(itemcode)
+                records = build_records(
+                    item, series, kospi_close_by_date, base_dates, extra_fields
+                )
+                merged = merge_records(out_file, records)
+                with out_file.open("w", encoding="utf-8") as f:
+                    json.dump(merged, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+            except (RuntimeError, OSError):
+                summary["failed"] += 1
+                stats["실패"] += 1
+            else:
+                added = len(records)
+                summary["records"] += added
+                summary["created" if is_new else "updated"] += 1
+                stats["신규" if is_new else "갱신"] += 1
+                stats["레코드"] += added
+        else:
+            summary["failed"] += 1
+            stats["실패"] += 1
+
+        if processed % SLEEP_EVERY == 0:  # API 부하 방지
+            time.sleep(SLEEP_SEC)
+
+        summary["elapsed"] = round(time.time() - started, 1)
+        if progress is not None:
+            progress(
+                {
+                    "stage": "item",
+                    "processed": processed,
+                    "itemcode": itemcode,
+                    "itemname": item.get("itemname", ""),
+                    "sector": sector,
+                    "added": added,
+                    # 종목마다 로그를 쌓으면 화면이 밀리므로 50종목 단위로만 남긴다
+                    "log": processed % SLEEP_EVERY == 0 or processed == len(items),
+                    **summary,
+                }
+            )
+
+    summary["files"] = [by_sector[sector] for sector in sorted(by_sector)]
+    summary["sectors"] = len(by_sector)
+    summary["elapsed"] = round(time.time() - started, 1)
+    return summary
 
 
 def update_values(
@@ -371,6 +481,21 @@ def _run_update(job_key: str, trading_days: int, token: str) -> dict:
 
     def on_progress(event: dict) -> None:
         ratio = event["processed"] / max(1, event["items"])
+        if event["stage"] == "item":
+            progress_bar.progress(
+                ratio,
+                text=f"[{event['processed']}/{event['items']}] {event['sector']} "
+                f"{event['itemcode']} {event['itemname']} ({event['elapsed']}초)",
+            )
+            if event["log"]:
+                log_lines.append(
+                    f"[{event['processed']:>5}/{event['items']}] "
+                    f"파일 신규 {event['created']:>4} · 갱신 {event['updated']:>4} → "
+                    f"{event['records']:>6}건  실패 {event['failed']:>3}  "
+                    f"({event['elapsed']}초)"
+                )
+                log_area.code("\n".join(log_lines), language="text")
+            return
         if event["stage"] == "start":
             progress_bar.progress(
                 ratio,
@@ -391,8 +516,9 @@ def _run_update(job_key: str, trading_days: int, token: str) -> dict:
         log_area.code("\n".join(log_lines), language="text")
 
     result: dict = {"ok": False, "job": job_key}
+    runner = update_item_values if job["layout"] == "item" else update_values
     try:
-        result["summary"] = update_values(
+        result["summary"] = runner(
             job["list_file"],
             job["out_dir"],
             trading_days,
@@ -431,12 +557,21 @@ def _render_result(result: dict) -> None:
         f"({summary['base_dates'][0]} ~ {summary['base_dates'][-1]})"
     )
 
-    columns = st.columns(5)
-    columns[0].metric("섹터", f"{summary['sectors']}개")
-    columns[1].metric(job["unit"], f"{summary['items']}종목")
-    columns[2].metric("레코드", f"{summary['records']:,}건")
-    columns[3].metric("실패", f"{summary['failed']}종목")
-    columns[4].metric("소요 시간", f"{summary['elapsed']}초")
+    if summary.get("layout") == "item":
+        columns = st.columns(6)
+        columns[0].metric(job["unit"], f"{summary['items']}종목")
+        columns[1].metric("신규 파일", f"{summary['created']}개")
+        columns[2].metric("갱신 파일", f"{summary['updated']}개")
+        columns[3].metric("레코드", f"{summary['records']:,}건")
+        columns[4].metric("실패", f"{summary['failed']}종목")
+        columns[5].metric("소요 시간", f"{summary['elapsed']}초")
+    else:
+        columns = st.columns(5)
+        columns[0].metric("섹터", f"{summary['sectors']}개")
+        columns[1].metric(job["unit"], f"{summary['items']}종목")
+        columns[2].metric("레코드", f"{summary['records']:,}건")
+        columns[3].metric("실패", f"{summary['failed']}종목")
+        columns[4].metric("소요 시간", f"{summary['elapsed']}초")
 
     if summary["failed"]:
         st.warning(f"{summary['failed']}개 종목은 시세 조회에 실패해 제외했습니다.")
@@ -468,7 +603,9 @@ def _render_job(job_key: str) -> None:
     state_key = f"admin_last_result_{job_key}"
 
     st.markdown(f"**{job['label']}**")
-    st.caption(f"{job['list_file'].name} → {job['out_dir'].relative_to(BASE_DIR)}")
+    out_path = str(job["out_dir"].relative_to(BASE_DIR)).replace("\\", "/")
+    target = f"{out_path}/{{itemcode}}.json" if job["layout"] == "item" else out_path
+    st.caption(f"{job['list_file'].name} → {target}")
 
     # 폼으로 묶으면 입력창에서 Enter를 누르지 않고 버튼을 눌러도 입력값이 함께 전달된다
     with st.form(f"admin_form_{job_key}", border=False):
@@ -510,8 +647,8 @@ def _render_job(job_key: str) -> None:
 def show() -> None:
     st.subheader("컨트롤")
     st.caption(
-        "기준 숫자만큼의 최근 거래일에 대해 지표를 계산하고 섹터별 JSON으로 저장합니다. "
-        "오늘(가장 최근 거래일)은 항상 포함됩니다."
+        "기준 숫자만큼의 최근 거래일에 대해 지표를 계산해 JSON으로 저장합니다. "
+        "ETF는 종목별 파일, KS-KQ는 섹터별 파일이며 오늘(가장 최근 거래일)은 항상 포함됩니다."
     )
 
     # 두 작업의 실행 결과를 각각 유지하도록 컨테이너와 세션 키를 분리한다
