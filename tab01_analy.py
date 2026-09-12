@@ -158,8 +158,12 @@ def passes_filters(
         if any(upper <= lower for upper, lower in zip(chain, chain[1:])):
             return False
 
-    if rs_only and (record.get("RS20") or 0.0) <= (record.get("RS50") or 0.0):
-        return False
+    if rs_only:
+        rs20 = record.get("RS20") or 0.0
+        rs50 = record.get("RS50") or 0.0
+        # 상장 기간이 짧아 RS가 채워지지 않은 종목(0)은 비교 대상에서 뺀다
+        if rs20 <= 0 or rs50 <= 0 or rs20 <= rs50:
+            return False
 
     if top52_ratio is not None:
         top52 = record.get("Top52") or 0.0
@@ -462,7 +466,7 @@ def _render_picked(etfs: dict[str, dict], holder_index: dict[str, list[str]]) ->
     holders = holder_index.get(name, [])
     st.divider()
     source = etfs.get(picked["itemcode"], {}).get("itemname", picked["itemcode"])
-    st.markdown(f"**구성 종목 · {name}이 포함된 ETF 종목** — {source} 에서 선택 / 포함 ETF {len(holders)}개")
+    st.markdown(f"**[구성 종목] '{name}' 포함된 ETF 종목** — {source} 에서 선택 / 포함 ETF {len(holders)}개")
     st.dataframe(
         [
             {

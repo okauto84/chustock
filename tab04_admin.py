@@ -115,6 +115,24 @@ def moving_average(closes: list[float], end_index: int, window: int) -> float:
     return round(sum(closes[start : end_index + 1]) / window, 2)
 
 
+def relative_strength(
+    closes: list[float], index_closes: list[float], end_index: int, window: int
+) -> float:
+    """종목과 지수의 window 거래일 수익률 비를 하루치로 환산해 100 기준으로 돌려준다.
+
+    100이면 지수와 같은 속도, 100보다 크면 지수보다 빠르게 오른 것이다.
+    누적 수익률비를 그대로 쓰면 기간이 다른 RS20과 RS50을 견줄 수 없어 1/window 제곱한다.
+    """
+    start = end_index - window
+    if start < 0:
+        return 0.0
+    prices = (closes[start], closes[end_index], index_closes[start], index_closes[end_index])
+    if any(price <= 0 for price in prices):  # 지수 결측이나 거래정지로 값이 비면 계산하지 않는다
+        return 0.0
+    ratio = (closes[end_index] / closes[start]) / (index_closes[end_index] / index_closes[start])
+    return round(ratio ** (1 / window) * 100, 4)
+
+
 def high_52weeks(dates: list[str], closes: list[float], end_index: int) -> float:
     """기준일로부터 1년 이내 최고 종가."""
     limit = (datetime.strptime(dates[end_index], "%Y%m%d") - timedelta(days=365)).strftime("%Y%m%d")
@@ -148,11 +166,8 @@ def build_records(
     volumes = [row[2] for row in series]
     index_by_date = {day: position for position, day in enumerate(dates)}
 
-    # Mansfield 상대강도: 종가 ÷ 코스피 종가 × 100
-    rs_series = [
-        close / kospi_close_by_date[day] * 100 if kospi_close_by_date.get(day) else 0.0
-        for day, close in zip(dates, closes)
-    ]
+    # 상대강도 계산용으로 종목 거래일에 맞춘 코스피 종가. 없는 날은 0으로 두고 건너뛴다
+    index_closes = [kospi_close_by_date.get(day, 0.0) for day in dates]
 
     latest_base_date = base_dates[-1]
     carried = item_fields(item, extra_fields)
@@ -176,10 +191,7 @@ def build_records(
             "Top52": high_52weeks(dates, closes, position) if base_date == latest_base_date else 0,
         }
         for window in RS_WINDOWS:
-            start = position - window + 1
-            record[f"RS{window}"] = (
-                round(sum(rs_series[start : position + 1]) / window, 4) if start >= 0 else 0.0
-            )
+            record[f"RS{window}"] = relative_strength(closes, index_closes, position, window)
         for window in MA_WINDOWS:
             record[f"ma{window}"] = moving_average(closes, position, window)
         records.append(record)
