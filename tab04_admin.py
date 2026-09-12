@@ -453,6 +453,15 @@ def _render_result(result: dict) -> None:
         st.error(f"GitHub push 실패 — {push['detail']}")
 
 
+def parse_trading_days(raw: str) -> int | None:
+    """입력값을 기준 거래일 수로 바꾼다. 정수가 아니거나 범위를 벗어나면 None."""
+    try:
+        days = int(str(raw).strip())
+    except ValueError:
+        return None
+    return days if 1 <= days <= MAX_TRADING_DAYS else None
+
+
 def _render_job(job_key: str) -> None:
     """작업 하나의 입력·버튼·결과를 독립된 영역으로 그린다."""
     job = JOBS[job_key]
@@ -465,13 +474,10 @@ def _render_job(job_key: str) -> None:
     with st.form(f"admin_form_{job_key}", border=False):
         input_col, button_col, _ = st.columns([2, 2, 3], vertical_alignment="bottom")
         with input_col:
-            trading_days = st.number_input(
-                f"기준 숫자 (오늘 포함 최근 거래일 수, 최대 {MAX_TRADING_DAYS}일)",
-                min_value=1,
-                max_value=MAX_TRADING_DAYS,
-                value=3,
-                step=1,
-                key=f"admin_trading_days_{job_key}",
+            raw_days = st.text_input(
+                f"기준 숫자 (오늘 포함 최근 거래일 수, 1 ~ {MAX_TRADING_DAYS})",
+                value="3",
+                key=f"admin_days_{job_key}",
             )
         with button_col:
             clicked = st.form_submit_button(job["label"], type="primary")
@@ -480,7 +486,13 @@ def _render_job(job_key: str) -> None:
         if not job["list_file"].exists():
             st.error(f"목록 파일이 없습니다: {job['list_file']}")
             return
-        trading_days = int(st.session_state[f"admin_trading_days_{job_key}"] or trading_days)
+        trading_days = parse_trading_days(raw_days)
+        if trading_days is None:
+            st.error(
+                f"기준 숫자는 1 ~ {MAX_TRADING_DAYS} 사이의 정수로 입력하세요. "
+                f"입력값: '{raw_days}'"
+            )
+            return
         with st.status(
             f"{job['label']} 진행 중입니다… (기준 {trading_days}거래일)", expanded=True
         ) as status:
