@@ -479,17 +479,33 @@ def show() -> None:
         [3, 2, 2, 1], vertical_alignment="bottom"
     )
     # 다른 탭에 갔다 돌아와도 고른 조건이 남도록 상태를 세션 단위로 유지한다
+    # accept_new_options=False·filter_mode=None 으로 목록 선택만 허용하고 입력·수정은 막는다
     with ma_col:
         ma_label = st.selectbox(
-            "이동평균선", list(MA_FILTERS), key=MA_KEY, persist_state="session"
+            "이동평균선",
+            list(MA_FILTERS),
+            key=MA_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
         )
     with rs_col:
         rs_label = st.selectbox(
-            "RS지수", list(RS_FILTERS), key=RS_KEY, persist_state="session"
+            "RS지수",
+            list(RS_FILTERS),
+            key=RS_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
         )
     with top52_col:
         top52_label = st.selectbox(
-            "신고가 비율", list(TOP52_FILTERS), key=TOP52_KEY, persist_state="session"
+            "신고가 비율",
+            list(TOP52_FILTERS),
+            key=TOP52_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
         )
     with button_col:
         st.button(
