@@ -1,4 +1,4 @@
-"""분석 탭: 이동평균·RS·신고가 조건으로 ETF를 걸러 트리 그리드로 보여준다."""
+"""분석 탭: 이동평균·신고가 조건으로 ETF를 걸러 트리 그리드로 보여준다."""
 
 import itertools
 import json
@@ -29,11 +29,6 @@ MA_FILTERS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-RS_FILTERS: dict[str, bool] = {
-    "전체": False,
-    "RS20>RS50": True,
-}
-
 # 라벨 -> 신고가(Top52) 대비 허용하는 하락률 상한
 # (Top52 - value) / Top52 이 이 값 이하면 조건 충족
 TOP52_FILTERS: dict[str, float | None] = {
@@ -58,7 +53,6 @@ MAX_DEPTH = 2  # 섹터(0) → 세부 분류(1) → 종목(2)
 ROW_PREFIX = "analytree"  # 컨테이너 key → CSS class(st-key-...) 로 연결선을 그린다
 
 MA_KEY = "analy_ma"
-RS_KEY = "analy_rs"
 TOP52_KEY = "analy_top52"
 OPEN_KEY = "analy_open_nodes"
 LIMIT_KEY = "analy_page_limits"
@@ -138,10 +132,9 @@ def build_holder_index(signature: tuple[float, int]) -> dict[str, list[str]]:
 def passes_filters(
     record: dict | None,
     ma_keys: tuple[str, ...],
-    rs_only: bool,
     top52_ratio: float | None,
 ) -> bool:
-    """최근 지표 레코드가 세 콤보박스 조건을 모두 만족하는지 본다."""
+    """최근 지표 레코드가 두 콤보박스 조건을 모두 만족하는지 본다."""
     if record is None:
         return False
 
@@ -156,13 +149,6 @@ def passes_filters(
             return False
         chain = [value, *averages]
         if any(upper <= lower for upper, lower in zip(chain, chain[1:])):
-            return False
-
-    if rs_only:
-        rs20 = record.get("RS20") or 0.0
-        rs50 = record.get("RS50") or 0.0
-        # 상장 기간이 짧아 RS가 채워지지 않은 종목(0)은 비교 대상에서 뺀다
-        if rs20 <= 0 or rs50 <= 0 or rs20 <= rs50:
             return False
 
     if top52_ratio is not None:
@@ -181,7 +167,6 @@ def filter_tree(
     categories: dict[str, dict[str, list[str]]],
     values: dict[str, dict],
     ma_keys: tuple[str, ...],
-    rs_only: bool,
     top52_ratio: float | None,
 ) -> dict[str, dict[str, list[str]]]:
     """조건을 만족하는 ETF만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
@@ -192,7 +177,7 @@ def filter_tree(
             kept = [
                 itemcode
                 for itemcode in itemcodes
-                if passes_filters(values.get(itemcode), ma_keys, rs_only, top52_ratio)
+                if passes_filters(values.get(itemcode), ma_keys, top52_ratio)
             ]
             if kept:
                 kept_lists[sectorlist] = kept
@@ -491,9 +476,7 @@ def show() -> None:
     etfs = load_etf_list(list_signature)
     as_of, values = load_latest_values(_dir_signature(ETF_VALUE_DIR))
 
-    ma_col, rs_col, top52_col, button_col = st.columns(
-        [3, 2, 2, 1], vertical_alignment="bottom"
-    )
+    ma_col, top52_col, button_col = st.columns([3, 2, 1], vertical_alignment="bottom")
     # 다른 탭에 갔다 돌아와도 고른 조건이 남도록 상태를 세션 단위로 유지한다
     # accept_new_options=False·filter_mode=None 으로 목록 선택만 허용하고 입력·수정은 막는다
     with ma_col:
@@ -501,15 +484,6 @@ def show() -> None:
             "이동평균선",
             list(MA_FILTERS),
             key=MA_KEY,
-            accept_new_options=False,
-            filter_mode=None,
-            persist_state="session",
-        )
-    with rs_col:
-        rs_label = st.selectbox(
-            "RS지수",
-            list(RS_FILTERS),
-            key=RS_KEY,
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -536,14 +510,13 @@ def show() -> None:
         categories,
         values,
         MA_FILTERS[ma_label],
-        RS_FILTERS[rs_label],
         TOP52_FILTERS[top52_label],
     )
     matched = sum(len(codes) for lists in tree.values() for codes in lists.values())
     total = sum(len(codes) for lists in categories.values() for codes in lists.values())
     as_of_text = as_of or "없음"
     st.caption(
-        f"기준일 {as_of_text} · 이동평균선 {ma_label} · RS지수 {rs_label} · "
+        f"기준일 {as_of_text} · 이동평균선 {ma_label} · "
         f"신고가 비율 {top52_label} → {matched}/{total}종목"
     )
 
