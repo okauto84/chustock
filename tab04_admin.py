@@ -60,6 +60,10 @@ SLEEP_SEC = 1  # API 부하 방지: 종목 50개 처리마다 1초
 SLEEP_EVERY = 50
 MAX_RETRY = 3
 
+GIT_TIMEOUT = 120  # 로컬 git 명령이 멈춰 앱이 잠기지 않도록 제한
+GIT_NET_TIMEOUT = 600  # 종목 파일이 많아 push·pull은 더 넉넉히 준다
+REJECT_HINTS = ("rejected", "non-fast-forward", "fetch first")
+
 GIT_USER_NAME = "okauto84"
 GIT_USER_EMAIL = "okauto84@gmail.com"
 GITHUB_REPO = "okauto84/chustock"
@@ -296,19 +300,46 @@ def _secret(name: str) -> str:
     return str(value or os.environ.get(name, "")).strip()
 
 
-def _run_git(*args: str, token: str = "") -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=BASE_DIR,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def _run_git(
+    *args: str, token: str = "", timeout: int = GIT_TIMEOUT
+) -> subprocess.CompletedProcess:
+    # 토큰이 만료돼도 자격 증명 입력을 기다리며 앱이 멈추지 않도록 프롬프트와 helper를 끈다
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+    try:
+        result = subprocess.run(
+            ["git", "-c", "credential.helper=", *args],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, 1, "", f"git 명령이 {timeout}초 안에 끝나지 않아 중단했습니다."
+        )
     if token:
         result.stdout = (result.stdout or "").replace(token, "***")
         result.stderr = (result.stderr or "").replace(token, "***")
     return result
+
+
+def git_identity() -> tuple[str, ...]:
+    """배포 환경에는 git user 설정이 없어 커밋·rebase가 실패하므로 직접 지정한다."""
+    return (
+        "-c",
+        f"user.name={_secret('GIT_USER_NAME') or GIT_USER_NAME}",
+        "-c",
+        f"user.email={_secret('GIT_USER_EMAIL') or GIT_USER_EMAIL}",
+    )
+
+
+def is_rejected(stderr: str) -> bool:
+    """원격에 다른 커밋이 있어 push가 거부된 경우인지 판별한다."""
+    lowered = stderr.lower()
+    return any(hint in lowered for hint in REJECT_HINTS)
 
 
 def push_url(origin: str, token: str) -> str:
@@ -338,19 +369,7 @@ def push_to_github(token: str, message: str, out_dir: Path) -> tuple[bool, str]:
     if added.returncode != 0:
         return False, added.stderr.strip()
 
-    # 배포 환경에는 git user 설정이 없어 커밋이 실패하므로 identity를 직접 지정한다
-    committed = _run_git(
-        "-c",
-        f"user.name={_secret('GIT_USER_NAME') or GIT_USER_NAME}",
-        "-c",
-        f"user.email={_secret('GIT_USER_EMAIL') or GIT_USER_EMAIL}",
-        "commit",
-        "-m",
-        message,
-        "--",
-        target,
-        token=token,
-    )
+    committed = _run_git(*git_identity(), "commit", "-m", message, "--", target, token=token)
     if committed.returncode != 0:
         return False, committed.stderr.strip() or committed.stdout.strip()
 
@@ -358,10 +377,37 @@ def push_to_github(token: str, message: str, out_dir: Path) -> tuple[bool, str]:
     origin = push_url(remote.stdout.strip() if remote.returncode == 0 else "", token)
 
     branch = _run_git("rev-parse", "--abbrev-ref", "HEAD", token=token).stdout.strip() or "main"
-    pushed = _run_git("push", origin, f"HEAD:{branch}", token=token)
+    if branch == "HEAD":  # detached HEAD에서는 브랜치 이름을 알 수 없다
+        branch = "main"
+
+    pushed = _run_git("push", origin, f"HEAD:{branch}", token=token, timeout=GIT_NET_TIMEOUT)
+    rebased_note = ""
+    if pushed.returncode != 0 and is_rejected(pushed.stderr):
+        # 원격에 다른 커밋이 있으면 rebase로 합친 뒤 한 번만 다시 시도한다
+        rebased = _run_git(
+            *git_identity(),
+            "pull",
+            "--rebase",
+            "--autostash",
+            origin,
+            branch,
+            token=token,
+            timeout=GIT_NET_TIMEOUT,
+        )
+        if rebased.returncode != 0:
+            _run_git("rebase", "--abort", token=token)
+            return False, (
+                "원격 커밋과 합치지 못해 push를 중단했습니다(커밋은 로컬에 남아 있습니다) — "
+                f"{rebased.stderr.strip() or rebased.stdout.strip()}"
+            )
+        rebased_note = " (원격 커밋과 rebase 후 재시도)"
+        pushed = _run_git("push", origin, f"HEAD:{branch}", token=token, timeout=GIT_NET_TIMEOUT)
+
     if pushed.returncode != 0:
-        return False, pushed.stderr.strip()
-    return True, f"{branch} 브랜치로 push 완료: {committed.stdout.strip().splitlines()[0]}"
+        return False, pushed.stderr.strip() or pushed.stdout.strip()
+
+    headline = committed.stdout.strip().splitlines()
+    return True, f"{branch} 브랜치로 push 완료{rebased_note}: {headline[0] if headline else message}"
 
 
 def github_token() -> str:
@@ -410,11 +456,14 @@ def _run_update(job_key: str, trading_days: int, token: str) -> dict:
 
     if token:
         with st.spinner("GitHub에 push 하는 중입니다…"):
-            pushed, detail = push_to_github(
-                token,
-                f"{job['commit']} {result['summary']['base_dates'][-1]}",
-                job["out_dir"],
-            )
+            try:
+                pushed, detail = push_to_github(
+                    token,
+                    f"{job['commit']} {result['summary']['base_dates'][-1]}",
+                    job["out_dir"],
+                )
+            except Exception as error:  # push가 깨져도 갱신 결과는 화면에 남긴다
+                pushed, detail = False, str(error)
         result["push"] = {"ok": pushed, "detail": detail}
     return result
 
