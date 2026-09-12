@@ -226,11 +226,20 @@ def _guide_css() -> str:
     rules = [
         # 행 간격이 남으면 세로선이 끊겨 보이므로 버튼·문단 여백을 줄인다
         f'div[class*="st-key-{ROW_PREFIX}-"] button {{'
-        " padding-top: 0; padding-bottom: 0; min-height: 1.5rem; }",
-        # 버튼 안쪽은 기본이 가운데 정렬이라 아이콘이 연결선에서 떨어진다
+        " padding-top: 0; padding-bottom: 0; min-height: 1.5rem;"
+        " width: auto !important; max-width: 100%; }",
+        # Streamlit tertiary 버튼은 안쪽 flex가 가운데라 연결선에서 라벨이 떨어진다
         f'div[class*="st-key-{ROW_PREFIX}-"] button,'
-        f' div[class*="st-key-{ROW_PREFIX}-"] button > div'
-        " { justify-content: flex-start; text-align: left; }",
+        f' div[class*="st-key-{ROW_PREFIX}-"] button *'
+        " { justify-content: flex-start !important; text-align: left !important; }",
+        f'div[class*="st-key-{ROW_PREFIX}-"]'
+        " [data-testid='stMarkdownContainer'],"
+        f' div[class*="st-key-{ROW_PREFIX}-"]'
+        " [data-testid='stMarkdownContainer'] p,"
+        f' div[class*="st-key-{ROW_PREFIX}-"]'
+        " [data-testid='stMarkdownContainer'] div"
+        " { text-align: left !important; justify-content: flex-start !important;"
+        " margin: 0; }",
         f'div[class*="st-key-{ROW_PREFIX}-"] p {{ margin-bottom: 0; }}',
         f'div[class*="st-key-{ROW_PREFIX}-"] [data-testid="stIconMaterial"]'
         " { font-size: 15px !important; }",
@@ -345,7 +354,7 @@ def _render_branch(row: dict, opened: set[str]) -> None:
             on_click=_toggle_node,
             args=(row["node"],),
             type="tertiary",
-            width="stretch",
+            width="content",
         )
 
 
@@ -360,7 +369,7 @@ def _render_more(row: dict) -> None:
             on_click=_grow_page,
             args=(row["node"],),
             type="tertiary",
-            width="stretch",
+            width="content",
         )
 
 
