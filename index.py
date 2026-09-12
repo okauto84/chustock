@@ -30,7 +30,8 @@ st.markdown(
         white-space: nowrap;
         color: #e03131 !important;
     }
-    div[data-testid="stHorizontalBlock"] {
+    /* 탭 화면의 vertical_alignment를 덮어쓰지 않도록 타이틀·탭 줄에만 적용한다 */
+    div[data-testid="stHorizontalBlock"]:has(div[role="radiogroup"]) {
         align-items: center;
     }
     div[role="radiogroup"] label {

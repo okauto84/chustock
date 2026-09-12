@@ -254,6 +254,7 @@ def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
             key=pills_key,
             on_change=_pick_holding,
             args=(pills_key, itemcode),
+            persist_state="session",
         )
 
 
@@ -336,12 +337,19 @@ def show() -> None:
     ma_col, rs_col, top52_col, button_col = st.columns(
         [3, 2, 2, 1], vertical_alignment="bottom"
     )
+    # 다른 탭에 갔다 돌아와도 고른 조건이 남도록 상태를 세션 단위로 유지한다
     with ma_col:
-        ma_label = st.selectbox("이동평균선", list(MA_FILTERS), key=MA_KEY)
+        ma_label = st.selectbox(
+            "이동평균선", list(MA_FILTERS), key=MA_KEY, persist_state="session"
+        )
     with rs_col:
-        rs_label = st.selectbox("RS지수", list(RS_FILTERS), key=RS_KEY)
+        rs_label = st.selectbox(
+            "RS지수", list(RS_FILTERS), key=RS_KEY, persist_state="session"
+        )
     with top52_col:
-        top52_label = st.selectbox("신고가 비율", list(TOP52_FILTERS), key=TOP52_KEY)
+        top52_label = st.selectbox(
+            "신고가 비율", list(TOP52_FILTERS), key=TOP52_KEY, persist_state="session"
+        )
     with button_col:
         st.button(
             "검색",
