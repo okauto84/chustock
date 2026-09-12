@@ -427,7 +427,8 @@ def _render_result(result: dict) -> None:
 
     summary = result["summary"]
     st.success(
-        f"{job['label']} 완료 — 기준일 {summary['base_dates'][0]} ~ {summary['base_dates'][-1]}"
+        f"{job['label']} 완료 — 기준일 {len(summary['base_dates'])}일 "
+        f"({summary['base_dates'][0]} ~ {summary['base_dates'][-1]})"
     )
 
     columns = st.columns(5)
@@ -460,25 +461,30 @@ def _render_job(job_key: str) -> None:
     st.markdown(f"**{job['label']}**")
     st.caption(f"{job['list_file'].name} → {job['out_dir'].relative_to(BASE_DIR)}")
 
-    input_col, button_col, _ = st.columns([2, 2, 3], vertical_alignment="bottom")
-    with input_col:
-        trading_days = st.number_input(
-            f"기준 숫자 (오늘 포함 최근 거래일 수, 최대 {MAX_TRADING_DAYS}일)",
-            min_value=1,
-            max_value=MAX_TRADING_DAYS,
-            value=3,
-            step=1,
-            key=f"admin_trading_days_{job_key}",
-        )
-    with button_col:
-        clicked = st.button(job["label"], type="primary", key=f"admin_run_{job_key}")
+    # 폼으로 묶으면 입력창에서 Enter를 누르지 않고 버튼을 눌러도 입력값이 함께 전달된다
+    with st.form(f"admin_form_{job_key}", border=False):
+        input_col, button_col, _ = st.columns([2, 2, 3], vertical_alignment="bottom")
+        with input_col:
+            trading_days = st.number_input(
+                f"기준 숫자 (오늘 포함 최근 거래일 수, 최대 {MAX_TRADING_DAYS}일)",
+                min_value=1,
+                max_value=MAX_TRADING_DAYS,
+                value=3,
+                step=1,
+                key=f"admin_trading_days_{job_key}",
+            )
+        with button_col:
+            clicked = st.form_submit_button(job["label"], type="primary")
 
     if clicked:
         if not job["list_file"].exists():
             st.error(f"목록 파일이 없습니다: {job['list_file']}")
             return
-        with st.status(f"{job['label']} 진행 중입니다…", expanded=True) as status:
-            result = _run_update(job_key, int(trading_days), github_token())
+        trading_days = int(st.session_state[f"admin_trading_days_{job_key}"] or trading_days)
+        with st.status(
+            f"{job['label']} 진행 중입니다… (기준 {trading_days}거래일)", expanded=True
+        ) as status:
+            result = _run_update(job_key, trading_days, github_token())
             status.update(
                 label=f"{job['label']} {'완료' if result.get('ok') else '실패'}",
                 state="complete" if result.get("ok") else "error",
