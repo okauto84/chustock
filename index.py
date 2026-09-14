@@ -5,6 +5,7 @@ import streamlit as st
 import tab01_analy
 import tab02_search
 import tab03_select
+import tab04_adm
 import tab04_admin
 
 st.set_page_config(
@@ -53,6 +54,7 @@ TAB_MAP = {
     "검색": tab02_search.show,
     "관심": tab03_select.show,
     "컨트롤": tab04_admin.show,
+    "관리": tab04_adm.show,
 }
 
 title_col, tab_col = st.columns([1, 6], gap="small")

@@ -1,4 +1,7 @@
-"""NAVER finance API로 코스피/코스닥 전 종목을 수집해 02_stocklist.json으로 저장한다."""
+"""NAVER finance API로 코스피/코스닥 전 종목과 ETF를 수집해 020_StockList.json으로 저장한다.
+
+ETF 구성종목은 NAVER가 공개하는 상위 10종목까지 제공된다.
+"""
 
 import json
 import time
@@ -7,6 +10,8 @@ import urllib.request
 from pathlib import Path
 
 API_BASE = "https://m.stock.naver.com/api"
+ETF_LIST_URL = "https://finance.naver.com/api/sise/etfItemList.nhn"
+ETF_ANALYSIS_URL = f"{API_BASE}/stock/{{code}}/etfAnalysis"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -23,7 +28,7 @@ MAX_RETRY = 3
 SECTOR_FILE = Path(__file__).resolve().parents[1] / "stock" / "010_SectorList.json"
 OUT_FILE = Path(__file__).resolve().parents[1] / "stock" / "020_StockList.json"
 
-# 네이버 업종명 -> (sectorcode, sectorlist)
+# 네이버 업종명 -> (sectorCode, sectorItem)
 INDUSTRY_MAP = {
     "반도체와반도체장비": ("semiconductor", "반도체 장비"),
     "디스플레이장비및부품": ("semiconductor", "반도체 장비"),
@@ -244,15 +249,48 @@ CODE_OVERRIDES = {
     "336570": ("culture", "미용기기"),  # 원텍
 }
 
+# 채권/통화/파생형 ETF는 업종 테마로 볼 수 없어 기타로 둔다.
+NON_EQUITY_KEYWORDS = (
+    "국채", "회사채", "특수채", "통안채", "채권", "금리", "CD", "달러", "엔화", "인버스",
+    "레버리지", "커버드콜", "선물", "원유", "구리", "금현물", "골드", "머니마켓", "TDF", "만기",
+)
 
-def fetch_json(url: str) -> dict:
+# 구성종목으로 섹터를 판단할 수 없을 때(해외/채권/원자재 ETF 등) ETF명으로 보정한다.
+ETF_NAME_RULES = [
+    (("파운드리", "TSMC"), "semiconductor", "비메모리"),
+    (("반도체", "필라델피아"), "semiconductor", "반도체 장비"),
+    (("2차전지", "이차전지", "배터리"), "battery", "배터리셀"),
+    (("원자력", "원전", "SMR"), "energy", "원자력"),
+    (("태양광", "풍력", "신재생", "그린에너지", "수소", "친환경"), "energy", "신재생"),
+    (("전력", "전선"), "energy", "전력기기"),
+    (("바이오", "헬스케어", "제약", "의료", "비만", "치료제", "항암"), "bio", "바이오신약"),
+    (("리츠", "REITs", "부동산"), "finance", "리츠"),
+    (("은행", "금융", "증권", "보험"), "finance", "은행"),
+    (("게임",), "it", "게임"),
+    (("인터넷", "플랫폼", "커머스"), "it", "인터넷"),
+    (("AI", "소프트웨어", "클라우드", "빅데이터", "테크", "IT", "양자"), "it", "SW/AI"),
+    (("K-POP", "케이팝", "엔터", "미디어", "콘텐츠"), "culture", "엔터"),
+    (("화장품", "뷰티"), "culture", "화장품"),
+    (("조선", "해운"), "shipping", "조선"),
+    (("자동차", "모빌리티", "전기차"), "automobile", "완성차"),
+    (("방산", "우주", "항공"), "defense", "방위산업"),
+    (("로봇", "로보", "기계"), "machine", "로봇"),
+    (("철강",), "chemistry", "철강"),
+    (("화학", "소재"), "chemistry", "화학"),
+    (("건설", "인프라", "통신"), "infra", "건설"),
+    (("소비재", "유통", "음식료", "여행", "레저"), "goods", "유통"),
+    (("지주",), "company", "지주사"),
+]
+
+
+def fetch_json(url: str, encoding: str = "utf-8") -> dict:
     """네이버 API를 호출해 JSON을 반환한다. 실패 시 지수 백오프로 재시도한다."""
     last_error: Exception | None = None
     for attempt in range(MAX_RETRY):
         try:
             request = urllib.request.Request(url, headers=HEADERS)
             with urllib.request.urlopen(request, timeout=15) as response:
-                return json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode(encoding, "replace"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             last_error = error
             time.sleep(2**attempt)
@@ -299,50 +337,95 @@ def fetch_industry_by_code() -> dict[str, str]:
     return industry_by_code
 
 
-def match_detail(sectorcode: str, itemname: str, default: str) -> str:
-    for keywords, detail in DETAIL_RULES.get(sectorcode, []):
-        if any(keyword in itemname for keyword in keywords):
+def fetch_etf_list() -> list[dict]:
+    """상장된 전체 ETF 목록을 가져온다."""
+    payload = fetch_json(ETF_LIST_URL, encoding="euc-kr")
+    return payload["result"]["etfItemList"]
+
+
+def fetch_etf_constituents(etf_code: str) -> list[dict]:
+    """ETF 구성종목(NAVER 공개 범위인 상위 10종목)을 가져온다."""
+    try:
+        payload = fetch_json(ETF_ANALYSIS_URL.format(code=etf_code))
+    except RuntimeError:
+        return []
+    return payload.get("etfTop10MajorConstituentAssets") or []
+
+
+def to_weight(raw_value: str | None) -> float:
+    try:
+        return float(str(raw_value).replace("%", "").replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+def match_detail(sector_code: str, stock_name: str, default: str) -> str:
+    for keywords, detail in DETAIL_RULES.get(sector_code, []):
+        if any(keyword in stock_name for keyword in keywords):
             return detail
     return default
 
 
-def classify(itemcode: str, itemname: str, industry: str | None) -> tuple[str, str]:
-    """종목코드/종목명/업종으로 (sectorcode, sectorlist)를 판단한다."""
-    if itemcode in CODE_OVERRIDES:
-        return CODE_OVERRIDES[itemcode]
+def classify(stock_code: str, stock_name: str, industry: str | None) -> tuple[str, str]:
+    """종목코드/종목명/업종으로 (sectorCode, sectorItem)을 판단한다."""
+    if stock_code in CODE_OVERRIDES:
+        return CODE_OVERRIDES[stock_code]
 
-    for keywords, sectorcode, detail in THEME_RULES:
-        if any(keyword in itemname for keyword in keywords):
-            return sectorcode, detail
+    for keywords, sector_code, detail in THEME_RULES:
+        if any(keyword in stock_name for keyword in keywords):
+            return sector_code, detail
 
     if industry in INDUSTRY_MAP:
-        sectorcode, detail = INDUSTRY_MAP[industry]
-        return sectorcode, match_detail(sectorcode, itemname, detail)
+        sector_code, detail = INDUSTRY_MAP[industry]
+        return sector_code, match_detail(sector_code, stock_name, detail)
 
     return "etc", "기타"
 
 
-def to_marketsum(raw_value: str | None) -> str:
-    """원 단위 시가총액을 억원 단위 문자열로 바꾼다. 예: '1250.6'"""
-    try:
-        return f"{int(raw_value) / 100_000_000:.1f}"
-    except (TypeError, ValueError):
-        return "0.0"
+def classify_etf(
+    etf_name: str,
+    constituents: list[dict],
+    sector_by_stock: dict[str, tuple[str, str]],
+) -> tuple[str, str]:
+    """구성종목의 섹터 비중으로 (sectorCode, sectorItem)을 판단한다."""
+    sector_weight: dict[str, float] = {}
+    detail_weight: dict[tuple[str, str], float] = {}
+    for asset in constituents:
+        matched = sector_by_stock.get(asset.get("itemCode", ""))
+        if matched is None:
+            continue
+        weight = to_weight(asset.get("etfWeight"))
+        sector_weight[matched[0]] = sector_weight.get(matched[0], 0.0) + weight
+        detail_weight[matched] = detail_weight.get(matched, 0.0) + weight
+
+    if sector_weight:
+        sector_code = max(sector_weight, key=sector_weight.get)
+        details = {key: value for key, value in detail_weight.items() if key[0] == sector_code}
+        return max(details, key=details.get)
+
+    if any(keyword in etf_name for keyword in NON_EQUITY_KEYWORDS):
+        return "etc", "기타"
+
+    for keywords, sector_code, sector_item in ETF_NAME_RULES:
+        if any(keyword in etf_name for keyword in keywords):
+            return sector_code, sector_item
+
+    return "etc", "기타"
 
 
 def main() -> None:
     sectors = json.loads(SECTOR_FILE.read_text(encoding="utf-8"))
-    sector_by_code = {item["sectorcode"]: item for item in sectors}
+    sector_by_code = {item["sectorCode"]: item for item in sectors}
 
-    print("[1/3] 시가총액 기준 전 종목 수집")
+    print("[1/5] 시가총액 기준 전 종목 수집")
     stocks = fetch_market_stocks()
     print(f"  개별 종목 {len(stocks)}건")
 
-    print("[2/3] 업종 정보 수집")
+    print("[2/5] 업종 정보 수집")
     industry_by_code = fetch_industry_by_code()
     print(f"  업종 매핑 {len(industry_by_code)}건")
 
-    print("[3/3] 섹터 분류 및 저장")
+    print("[3/5] 섹터 분류")
     classified = {
         stock["itemCode"]: classify(
             stock["itemCode"], stock["stockName"], industry_by_code.get(stock["itemCode"])
@@ -350,28 +433,58 @@ def main() -> None:
         for stock in stocks
     }
     # 우선주는 업종 정보가 없는 경우가 많아 보통주 분류를 따른다.
-    for itemcode in classified:
-        base_code = itemcode[:5] + "0"
-        if itemcode[5] != "0" and base_code in classified:
-            classified[itemcode] = classified[base_code]
+    for stock_code in classified:
+        base_code = stock_code[:5] + "0"
+        if stock_code[5] != "0" and base_code in classified:
+            classified[stock_code] = classified[base_code]
+
+    def validate(name: str, sector_code: str, sector_item: str) -> None:
+        sector = sector_by_code[sector_code]
+        if sector_item not in sector["sectorItems"]:
+            raise ValueError(f"{name}: '{sector_item}'는 {sector_code} 하위 분류가 아니다")
 
     result = []
     for stock in stocks:
-        itemcode = stock["itemCode"]
-        itemname = stock["stockName"]
-        sectorcode, sectorlist = classified[itemcode]
-        sector = sector_by_code[sectorcode]
-        if sectorlist not in sector["sectorlist"]:
-            raise ValueError(f"{itemname}: '{sectorlist}'는 {sectorcode} 하위 분류가 아니다")
+        stock_code = stock["itemCode"]
+        stock_name = stock["stockName"]
+        sector_code, sector_item = classified[stock_code]
+        validate(stock_name, sector_code, sector_item)
         result.append(
             {
-                "itemcode": itemcode,
-                "itemname": itemname,
-                "stock": stock["stockExchangeType"]["code"],
-                "marketsum": to_marketsum(stock.get("marketValueRaw")),
-                "sectorcode": sectorcode,
-                "sector": sector["sector"],
-                "sectorlist": sectorlist,
+                "stockCode": stock_code,
+                "stockName": stock_name,
+                "stockItem": stock["stockExchangeType"]["code"],
+                "sectorCode": sector_code,
+                "sectorItem": sector_item,
+            }
+        )
+
+    print("[4/5] ETF 목록 및 구성종목 수집")
+    etfs = fetch_etf_list()
+    print(f"  ETF {len(etfs)}건")
+    constituents_by_code: dict[str, list[dict]] = {}
+    for index, etf in enumerate(etfs, start=1):
+        constituents_by_code[etf["itemcode"]] = fetch_etf_constituents(etf["itemcode"])
+        if index % PAGE_SIZE == 0:
+            print(f"  {index}/{len(etfs)} 처리")
+            time.sleep(SLEEP_SEC)
+
+    print("[5/5] ETF 섹터 분류 및 저장")
+    sector_by_stock = {row["stockCode"]: (row["sectorCode"], row["sectorItem"]) for row in result}
+    for etf in etfs:
+        etf_code = etf["itemcode"]
+        etf_name = etf["itemname"]
+        constituents = constituents_by_code[etf_code]
+        sector_code, sector_item = classify_etf(etf_name, constituents, sector_by_stock)
+        validate(etf_name, sector_code, sector_item)
+        result.append(
+            {
+                "stockCode": etf_code,
+                "stockName": etf_name,
+                "stockItem": "ETF",
+                "stockItems": [asset["itemName"] for asset in constituents],
+                "sectorCode": sector_code,
+                "sectorItem": sector_item,
             }
         )
 
@@ -379,7 +492,7 @@ def main() -> None:
     with OUT_FILE.open("w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    print(f"created: {OUT_FILE} ({len(result)}건)")
+    print(f"created: {OUT_FILE} (종목 {len(stocks)}건 + ETF {len(etfs)}건 = {len(result)}건)")
 
 
 if __name__ == "__main__":
