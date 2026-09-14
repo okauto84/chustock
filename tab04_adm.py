@@ -68,6 +68,13 @@ STOCK_DATA_COLUMNS = (
 )
 PAGE_SIZE = 1000  # PostgREST 기본 상한에 맞춰 STOCKS를 나눠 읽는다
 
+# 적재 방식 — 콤보박스에서만 고르고 직접 입력은 막는다
+INSERT_MODES = (
+    "덮어쓰기(upsert)",
+    "그대로 INSERT",
+    "기존 데이터 삭제 후 적재",
+)
+
 SISE_URL = (
     "https://api.finance.naver.com/siseJson.naver"
     "?symbol={symbol}&requestType=1&startTime={start}&endTime={end}&timeframe=day"
@@ -150,6 +157,15 @@ def fetch_market_sum(stock_code: str, stock_item: str) -> float:
         if isinstance(info, dict) and info.get("code") == "marketValue":
             return parse_market_sum_text(info.get("value"))
     return 0.0
+
+
+def parse_insert_mode(label: str) -> tuple[bool, bool]:
+    """적재 방식 라벨을 (upsert, clear)로 바꾼다."""
+    if label == "기존 데이터 삭제 후 적재":
+        return False, True
+    if label == "덮어쓰기(upsert)":
+        return True, False
+    return False, False
 
 
 def _secret(name: str) -> str:
@@ -632,20 +648,20 @@ def _render_base_insert(api_key: str, found: list[str]) -> None:
         st.caption(f"{path} → {target['table']} ({len(target['columns'])}개 컬럼)")
 
     with st.form("adm_insert_form", border=False):
-        mode_col, clear_col, button_col = st.columns([3, 2, 2], vertical_alignment="bottom")
+        mode_col, button_col = st.columns([4, 2], vertical_alignment="bottom")
         with mode_col:
-            mode = st.radio(
-                "중복 처리",
-                ("덮어쓰기(upsert)", "그대로 INSERT"),
-                horizontal=True,
+            mode = st.selectbox(
+                "적재 방식",
+                INSERT_MODES,
                 key="adm_insert_mode",
+                accept_new_options=False,
+                filter_mode=None,
             )
-        with clear_col:
-            clear = st.checkbox("기존 데이터 삭제 후 적재", key="adm_insert_clear")
         with button_col:
             clicked = st.form_submit_button("기준 데이터 INSERT", type="primary")
 
     if clicked:
+        upsert, clear = parse_insert_mode(mode)
         absent = [t["file"] for t in TARGETS if not t["file"].exists()]
         if absent:
             st.error(f"기준 데이터 파일이 없습니다: {', '.join(f.name for f in absent)}")
@@ -654,9 +670,7 @@ def _render_base_insert(api_key: str, found: list[str]) -> None:
                 resolved = _require_project(api_key, found)
                 if resolved:
                     _, project = resolved
-                    results = insert_base_data(
-                        project, api_key, mode.startswith("덮어쓰기"), clear
-                    )
+                    results = insert_base_data(project, api_key, upsert, clear)
                 else:
                     results = [
                         {
@@ -688,9 +702,7 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
     )
 
     with st.form("adm_stock_data_form", border=False):
-        days_col, mode_col, clear_col, button_col = st.columns(
-            [2, 3, 2, 2], vertical_alignment="bottom"
-        )
+        days_col, mode_col, button_col = st.columns([2, 4, 2], vertical_alignment="bottom")
         with days_col:
             raw_days = st.text_input(
                 f"기준 숫자 (오늘 포함 최근 거래일 수, 1 ~ {MAX_TRADING_DAYS})",
@@ -698,18 +710,18 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
                 key="adm_stock_data_days",
             )
         with mode_col:
-            mode = st.radio(
-                "중복 처리",
-                ("덮어쓰기(upsert)", "그대로 INSERT"),
-                horizontal=True,
+            mode = st.selectbox(
+                "적재 방식",
+                INSERT_MODES,
                 key="adm_stock_data_mode",
+                accept_new_options=False,
+                filter_mode=None,
             )
-        with clear_col:
-            clear = st.checkbox("기존 데이터 삭제 후 적재", key="adm_stock_data_clear")
         with button_col:
             clicked = st.form_submit_button("시세 데이터 INSERT", type="primary")
 
     if clicked:
+        upsert, clear = parse_insert_mode(mode)
         trading_days = parse_trading_days(raw_days)
         if trading_days is None:
             st.error(
@@ -751,7 +763,7 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
                         project,
                         api_key,
                         trading_days,
-                        mode.startswith("덮어쓰기"),
+                        upsert,
                         clear,
                         progress=on_progress,
                     )
