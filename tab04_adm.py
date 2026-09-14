@@ -18,6 +18,9 @@ CHUNK_SIZE = 500  # PostgREST 한 번에 보낼 행 수
 TIMEOUT = 60
 MAX_RETRY = 3
 
+# 프로젝트 주소로 쓸 값. 앞에서부터 실제로 접속되는 것을 골라 쓴다.
+PROJECT_SECRETS = ("SUPABASE_PROJECT", "SUPABASE_ID")
+
 # 리스트 컬럼은 빈 배열로, 나머지는 빈 문자열로 채운다.
 # PostgREST는 한 번에 보내는 행들의 key가 모두 같아야 하므로 없는 값도 채워 보낸다.
 LIST_COLUMNS = ("sectorItems", "stockItems")
@@ -37,22 +40,6 @@ TARGETS = (
     },
 )
 
-DDL_HINT = """-- 컬럼명이 JSON key와 대소문자까지 같아야 하므로 큰따옴표로 만든다
-create table if not exists "SECTORS" (
-  "sectorCode"  text primary key,
-  "sectorName"  text,
-  "sectorItems" jsonb
-);
-
-create table if not exists "STOCKS" (
-  "stockCode"  text primary key,
-  "stockName"  text,
-  "stockItem"  text,
-  "stockItems" jsonb,
-  "sectorCode" text,
-  "sectorItem" text
-);"""
-
 
 def _secret(name: str) -> str:
     """설정값을 st.secrets에서 읽고, 없으면 환경변수로 대체한다."""
@@ -64,13 +51,20 @@ def _secret(name: str) -> str:
 
 
 def rest_url(project: str, table: str) -> str:
-    """SUPABASE_PROJECT를 REST 엔드포인트로 바꾼다. 프로젝트 ref와 전체 URL을 모두 받는다."""
+    """프로젝트 값을 REST 엔드포인트로 바꾼다. 프로젝트 ref와 전체 URL을 모두 받는다."""
     project = project.strip().rstrip("/")
     base = project if project.startswith("http") else f"https://{project}.supabase.co"
     return f"{base}/rest/v1/{urllib.parse.quote(table)}"
 
 
-def call_rest(url: str, api_key: str, method: str, prefer: str, payload: list | None) -> str:
+def call_rest(
+    url: str,
+    api_key: str,
+    method: str,
+    prefer: str,
+    payload: list | None,
+    retries: int = MAX_RETRY,
+) -> str:
     """Supabase REST를 호출하고 응답 본문을 돌려준다. 실패 시 지수 백오프로 재시도한다."""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     headers = {
@@ -80,7 +74,7 @@ def call_rest(url: str, api_key: str, method: str, prefer: str, payload: list | 
         "Prefer": prefer,
     }
     last_error: Exception | None = None
-    for attempt in range(MAX_RETRY):
+    for attempt in range(retries):
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
@@ -90,8 +84,31 @@ def call_rest(url: str, api_key: str, method: str, prefer: str, payload: list | 
             raise RuntimeError(f"HTTP {error.code} {detail}") from error
         except (urllib.error.URLError, TimeoutError) as error:
             last_error = error
-            time.sleep(2**attempt)
+            if attempt < retries - 1:
+                time.sleep(2**attempt)
     raise RuntimeError(f"요청 실패: {url} — {last_error}")
+
+
+def resolve_project(api_key: str) -> tuple[str, str, list[dict]]:
+    """SUPABASE_PROJECT·SUPABASE_ID를 차례로 시도해 접속되는 값을 고른다.
+
+    테이블 유무와 무관하게 판단하려고 REST 루트(/rest/v1/)로만 확인한다.
+    (secrets 이름, 프로젝트 값, 시도 기록)을 돌려주고 모두 실패하면 이름·값이 빈 문자열이다.
+    """
+    attempts: list[dict] = []
+    for name in PROJECT_SECRETS:
+        value = _secret(name)
+        if not value:
+            attempts.append({"secrets": name, "값": "", "결과": "secrets에 없음"})
+            continue
+        try:
+            call_rest(rest_url(value, ""), api_key, "GET", "return=minimal", None, retries=1)
+        except RuntimeError as error:
+            attempts.append({"secrets": name, "값": value, "결과": f"실패 — {error}"})
+        else:
+            attempts.append({"secrets": name, "값": value, "결과": "접속 성공"})
+            return name, value, attempts
+    return "", "", attempts
 
 
 def normalize(rows: list[dict], columns: tuple[str, ...]) -> list[dict]:
@@ -186,12 +203,11 @@ def _render_results(results: list[dict]) -> None:
 def show() -> None:
     st.subheader("관리")
     st.caption(
-        "010_SectorList.json을 SECTORS 테이블, 020_StockList.json을 STOCKS 테이블에 적재합니다. "
-        "접속 정보는 secrets의 SUPABASE_PROJECT·SUPABASE_KEY를 사용합니다."
+        "섹터 리스트 정보를 SECTORS 테이블, ETF/종목 정보를 STOCKS 테이블에 적재합니다. "
     )
 
-    project = _secret("SUPABASE_PROJECT")
     api_key = _secret("SUPABASE_KEY")
+    projects = {name: _secret(name) for name in PROJECT_SECRETS}
 
     with st.container(border=True):
         st.markdown("**기준 데이터 INSERT**")
@@ -199,18 +215,15 @@ def show() -> None:
             path = str(target["file"].relative_to(BASE_DIR)).replace("\\", "/")
             st.caption(f"{path} → {target['table']} ({len(target['columns'])}개 컬럼)")
 
-        missing = [
-            name
-            for name, value in (("SUPABASE_PROJECT", project), ("SUPABASE_KEY", api_key))
-            if not value
-        ]
-        if missing:
-            st.error(f"secrets에 {', '.join(missing)}가 없습니다.")
+        found = [name for name, value in projects.items() if value]
+        if not api_key:
+            st.error("secrets에 SUPABASE_KEY가 없습니다.")
+        elif not found:
+            st.error(f"secrets에 {' 또는 '.join(PROJECT_SECRETS)}가 없습니다.")
         else:
-            st.caption(f"대상 프로젝트: {rest_url(project, '')}")
-
-        with st.expander("테이블이 없다면 아래 DDL로 먼저 생성하세요"):
-            st.code(DDL_HINT, language="sql")
+            st.caption(
+                f"프로젝트 주소 후보: {', '.join(found)} — 실행할 때 접속되는 값을 자동으로 씁니다."
+            )
 
         with st.form("adm_insert_form", border=False):
             mode_col, clear_col, button_col = st.columns([3, 2, 2], vertical_alignment="bottom")
@@ -228,15 +241,31 @@ def show() -> None:
 
         if clicked:
             absent = [t["file"] for t in TARGETS if not t["file"].exists()]
-            if missing:
+            if not api_key or not found:
                 st.error("secrets 설정을 먼저 채운 뒤 다시 실행하세요.")
             elif absent:
                 st.error(f"기준 데이터 파일이 없습니다: {', '.join(f.name for f in absent)}")
             else:
                 with st.status("기준 데이터 INSERT 진행 중입니다…", expanded=True) as status:
-                    results = insert_base_data(
-                        project, api_key, mode.startswith("덮어쓰기"), clear
-                    )
+                    with st.spinner("프로젝트 주소를 확인하는 중입니다…"):
+                        name, project, attempts = resolve_project(api_key)
+                    st.dataframe(attempts, width="stretch", hide_index=True)
+                    if project:
+                        st.caption(f"{name} 값으로 접속합니다: {rest_url(project, '')}")
+                        results = insert_base_data(
+                            project, api_key, mode.startswith("덮어쓰기"), clear
+                        )
+                    else:
+                        results = [
+                            {
+                                "테이블": target["table"],
+                                "파일": target["file"].name,
+                                "행": 0,
+                                "결과": "실패 — 접속되는 프로젝트 주소가 없습니다",
+                                "ok": False,
+                            }
+                            for target in TARGETS
+                        ]
                     done = all(row.get("ok") for row in results)
                     status.update(
                         label=f"기준 데이터 INSERT {'완료' if done else '실패'}",
