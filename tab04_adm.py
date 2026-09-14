@@ -42,8 +42,10 @@ TARGETS = (
     },
 )
 
+STOCKS_TABLE = "STOCKS"
 STOCK_DATA_TABLE = "STOCK_DATA"
 STOCK_DATA_CONFLICT = "stockCode,date"
+STOCKS_SELECT = "stockCode,stockName,stockItem,sectorCode,sectorItem"
 STOCK_DATA_COLUMNS = (
     "stockCode",
     "stockItem",
@@ -62,6 +64,7 @@ STOCK_DATA_COLUMNS = (
     "ma100",
     "ma150",
 )
+PAGE_SIZE = 1000  # PostgREST 기본 상한에 맞춰 STOCKS를 나눠 읽는다
 
 SISE_URL = (
     "https://api.finance.naver.com/siseJson.naver"
@@ -109,6 +112,7 @@ def call_rest(
     prefer: str,
     payload: list | None,
     retries: int = MAX_RETRY,
+    extra_headers: dict[str, str] | None = None,
 ) -> str:
     """Supabase REST를 호출하고 응답 본문을 돌려준다. 실패 시 지수 백오프로 재시도한다."""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
@@ -118,6 +122,8 @@ def call_rest(
         "Content-Type": "application/json",
         "Prefer": prefer,
     }
+    if extra_headers:
+        headers.update(extra_headers)
     last_error: Exception | None = None
     for attempt in range(retries):
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -132,6 +138,36 @@ def call_rest(
             if attempt < retries - 1:
                 time.sleep(2**attempt)
     raise RuntimeError(f"요청 실패: {url} — {last_error}")
+
+
+def fetch_stocks(project: str, api_key: str) -> list[dict]:
+    """STOCKS 테이블에서 시세 적재에 필요한 종목 목록을 페이지 단위로 가져온다."""
+    items: list[dict] = []
+    offset = 0
+    while True:
+        query = urllib.parse.urlencode(
+            {
+                "select": STOCKS_SELECT,
+                "order": "stockCode",
+                "limit": PAGE_SIZE,
+                "offset": offset,
+            }
+        )
+        raw = call_rest(
+            f"{rest_url(project, STOCKS_TABLE)}?{query}",
+            api_key,
+            "GET",
+            "return=representation",
+            None,
+        )
+        chunk = json.loads(raw) if raw.strip() else []
+        if not isinstance(chunk, list):
+            raise RuntimeError(f"{STOCKS_TABLE} 응답이 리스트가 아닙니다")
+        items.extend(chunk)
+        if len(chunk) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
+    return items
 
 
 def resolve_project(api_key: str) -> tuple[str, str, list[dict]]:
@@ -352,10 +388,10 @@ def insert_stock_data(
     clear: bool,
     progress=None,
 ) -> dict:
-    """시세를 모아 지표를 계산해 STOCK_DATA에 적재한다. JSON 파일은 만들지 않는다."""
-    items = json.loads(STOCK_FILE.read_text(encoding="utf-8"))
-    if not isinstance(items, list):
-        raise RuntimeError(f"{STOCK_FILE.name}: 최상위가 리스트가 아닙니다")
+    """STOCKS 종목을 기준으로 시세를 모아 지표를 계산해 STOCK_DATA에 적재한다."""
+    items = fetch_stocks(project, api_key)
+    if not items:
+        raise RuntimeError(f"{STOCKS_TABLE} 테이블에 종목이 없습니다")
 
     kospi_series = fetch_daily(KOSPI_SYMBOL)
     kospi_close_by_date = {day: close for day, close, _ in kospi_series}
@@ -559,7 +595,7 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
     """시세 지표를 계산해 STOCK_DATA에 적재하는 컨트롤 UI."""
     st.markdown("**시세 데이터 INSERT**")
     st.caption(
-        f"{STOCK_FILE.name} 종목의 시세를 API로 조회·계산해 {STOCK_DATA_TABLE}에 적재합니다. "
+        f"{STOCKS_TABLE} 테이블 종목의 시세를 API로 조회·계산해 {STOCK_DATA_TABLE}에 적재합니다. "
         "JSON 파일은 생성하지 않습니다. stockCode·stockItem·sectorCode·sectorItem은 STOCKS와 동일합니다."
     )
 
@@ -586,9 +622,6 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
             clicked = st.form_submit_button("시세 데이터 INSERT", type="primary")
 
     if clicked:
-        if not STOCK_FILE.exists():
-            st.error(f"목록 파일이 없습니다: {STOCK_FILE}")
-            return
         trading_days = parse_trading_days(raw_days)
         if trading_days is None:
             st.error(

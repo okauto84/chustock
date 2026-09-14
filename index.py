@@ -23,26 +23,84 @@ st.markdown(
     h1, h2, h3, h4, h5, h6 {
         font-size: 12px !important;
     }
+
+    /* 상단 여백 축소 */
+    header[data-testid="stHeader"] {
+        height: 0 !important;
+        min-height: 0 !important;
+    }
+    .stAppDeployButton, [data-testid="stToolbar"] {
+        display: none !important;
+    }
+    .block-container {
+        padding-top: 0.6rem !important;
+        padding-bottom: 1rem !important;
+    }
+    div[data-testid="stVerticalBlock"] > div:first-child {
+        gap: 0.35rem !important;
+    }
+
     .app-title {
         font-size: 18px !important;
         font-weight: 700;
-        line-height: 2.2rem;
+        line-height: 1.8rem;
         margin: 0;
         white-space: nowrap;
         color: #e03131 !important;
     }
-    /* 탭 화면의 vertical_alignment를 덮어쓰지 않도록 타이틀·탭 줄에만 적용한다 */
+
+    /* 타이틀·탭 한 줄: 폴더형 탭 바 배경 */
     div[data-testid="stHorizontalBlock"]:has(div[role="radiogroup"]) {
-        align-items: center;
+        align-items: flex-end !important;
+        gap: 0.75rem !important;
+        margin-bottom: 0 !important;
+        padding: 0.35rem 0.5rem 0 0.5rem !important;
+        border-bottom: 1px solid #cfd4dc;
+        background: #eef1f5;
+        border-radius: 6px 6px 0 0;
     }
-    div[role="radiogroup"] label {
-        border: 1px solid transparent;
-        border-radius: 6px;
-        padding: 2px 10px;
+
+    /* 폴더형 탭 */
+    div[role="radiogroup"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 2px !important;
+        align-items: flex-end !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
     }
-    div[role="radiogroup"] label:has(input:checked) {
-        border-color: #d9d9d9;
-        background-color: rgba(0, 0, 0, 0.03);
+    div[role="radiogroup"] > label {
+        margin: 0 !important;
+        padding: 0.45rem 0.95rem !important;
+        border: 1px solid transparent !important;
+        border-bottom: none !important;
+        border-radius: 6px 6px 0 0 !important;
+        background: #eef1f5 !important;
+        color: #5c6570 !important;
+        font-weight: 600 !important;
+        line-height: 1.2 !important;
+        cursor: pointer !important;
+        position: relative !important;
+        top: 1px !important;
+        box-shadow: none !important;
+    }
+    div[role="radiogroup"] > label:hover {
+        background: #e3e7ed !important;
+        color: #2f3640 !important;
+    }
+    /* 활성 탭: 흰 배경 + 상·좌·우 테두리, 하단은 콘텐츠와 이어짐 */
+    div[role="radiogroup"] > label:has(input:checked) {
+        background: #ffffff !important;
+        color: #1f2933 !important;
+        border-color: #cfd4dc !important;
+        border-bottom: 1px solid #ffffff !important;
+        z-index: 1 !important;
+    }
+    /* radio 원형 표시 숨김 */
+    div[role="radiogroup"] > label > div:first-child {
+        display: none !important;
     }
     </style>
     """,

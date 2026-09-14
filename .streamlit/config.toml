@@ -1,0 +1,22 @@
+# Streamlit Community Cloud / 로컬 모두에서 메모리·재실행 부하를 줄인다.
+
+[server]
+# 배포 환경에서는 파일 감시가 메모리를 많이 쓰므로 끈다
+fileWatcherType = "none"
+# 대용량 업로드·메시지는 쓰지 않으므로 상한을 낮춘다
+maxUploadSize = 5
+maxMessageSize = 50
+enableWebsocketCompression = true
+# 헤드리스 서버 모드(브라우저 자동 실행 안 함)
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[runner]
+# 위젯 변경 시 전체 스크립트를 덜 무겁게 다시 돌린다
+fastReruns = true
