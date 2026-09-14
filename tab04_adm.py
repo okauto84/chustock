@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -63,6 +63,8 @@ STOCK_DATA_COLUMNS = (
     "ma50",
     "ma100",
     "ma150",
+    "top52Value",
+    "marketSum",
 )
 PAGE_SIZE = 1000  # PostgREST 기본 상한에 맞춰 STOCKS를 나눠 읽는다
 
@@ -70,6 +72,8 @@ SISE_URL = (
     "https://api.finance.naver.com/siseJson.naver"
     "?symbol={symbol}&requestType=1&startTime={start}&endTime={end}&timeframe=day"
 )
+STOCK_INTEGRATION_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
+ETF_ANALYSIS_URL = "https://m.stock.naver.com/api/stock/{code}/etfAnalysis"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -87,6 +91,65 @@ SLEEP_SEC = 1
 SLEEP_EVERY = 50
 
 ROW_PATTERN = re.compile(r'\["(\d{8})",([^\]]*)\]')
+MARKET_JO = re.compile(r"([\d.]+)\s*조")
+MARKET_EOK = re.compile(r"([\d.]+)\s*억")
+
+
+def fetch_json_api(url: str) -> dict | list:
+    """네이버 JSON API를 호출한다. 실패 시 지수 백오프로 재시도한다."""
+    last_error: Exception | None = None
+    for attempt in range(MAX_RETRY):
+        try:
+            request = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            last_error = error
+            time.sleep(2**attempt)
+    raise RuntimeError(f"요청 실패: {url}") from last_error
+
+
+def parse_market_sum_text(raw: str | None) -> float:
+    """'1,452조 8,002억' 형태를 억원 단위 숫자로 바꾼다."""
+    text = str(raw or "").replace(",", "")
+    total = 0.0
+    jo = MARKET_JO.search(text)
+    if jo:
+        total += float(jo.group(1)) * 10_000  # 1조 = 10,000억
+    eok = MARKET_EOK.search(text)
+    if eok:
+        total += float(eok.group(1))
+    return round(total, 1)
+
+
+def to_market_sum_eok(raw_value) -> float:
+    """원 단위 시가총액을 억원 단위로 바꾼다."""
+    try:
+        return round(float(str(raw_value).replace(",", "")) / 100_000_000, 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def fetch_market_sum(stock_code: str, stock_item: str) -> float:
+    """종목의 현재 시가총액(억원)을 가져온다."""
+    if stock_item == "ETF":
+        try:
+            payload = fetch_json_api(ETF_ANALYSIS_URL.format(code=stock_code))
+            if isinstance(payload, dict) and payload.get("marketValueRaw") not in (None, ""):
+                return to_market_sum_eok(payload["marketValueRaw"])
+        except RuntimeError:
+            pass
+
+    try:
+        payload = fetch_json_api(STOCK_INTEGRATION_URL.format(code=stock_code))
+    except RuntimeError:
+        return 0.0
+    if not isinstance(payload, dict):
+        return 0.0
+    for info in payload.get("totalInfos") or []:
+        if isinstance(info, dict) and info.get("code") == "marketValue":
+            return parse_market_sum_text(info.get("value"))
+    return 0.0
 
 
 def _secret(name: str) -> str:
@@ -335,11 +398,25 @@ def average_rs(closes: list[float], kospis: list[float], end_index: int, window:
     return round(sum(values) / len(values), 4) if values else 0.0
 
 
+def top52_value(dates: list[str], closes: list[float], end_index: int) -> float:
+    """기준일로부터 과거 1년(52주) 구간의 최고 종가."""
+    limit = (
+        datetime.strptime(dates[end_index], "%Y%m%d") - timedelta(days=365)
+    ).strftime("%Y%m%d")
+    window = [
+        close
+        for day, close in zip(dates[: end_index + 1], closes[: end_index + 1])
+        if day > limit
+    ]
+    return round(max(window), 2) if window else 0.0
+
+
 def build_stock_data_records(
     item: dict,
     series: list[tuple[str, float, int]],
     kospi_close_by_date: dict[str, float],
     base_dates: list[str],
+    market_sum_today: float,
 ) -> list[dict]:
     """한 종목에 대해 STOCK_DATA 행을 만든다. STOCKS와 같은 키를 그대로 쓴다."""
     # 코스피가 있는 거래일만 남겨 RS·이평 계산 인덱스가 맞춰지게 한다
@@ -356,12 +433,18 @@ def build_stock_data_records(
     volumes = [row[2] for row in aligned]
     kospis = [kospi_close_by_date[day] for day in dates]
     index_by_date = {day: position for position, day in enumerate(dates)}
+    latest_close = closes[-1] if closes else 0.0
 
     records = []
     for base_date in base_dates:
         position = index_by_date.get(base_date)
         if position is None:
             continue
+        # 발행주식수가 같다면 시가총액은 종가에 비례한다
+        if latest_close > 0 and market_sum_today > 0:
+            market_sum = round(market_sum_today * (closes[position] / latest_close), 1)
+        else:
+            market_sum = market_sum_today
         record = {
             "stockCode": item["stockCode"],
             "stockItem": item["stockItem"],
@@ -371,6 +454,8 @@ def build_stock_data_records(
             "value": closes[position],
             "proc": volumes[position],
             "kospi": kospis[position],
+            "top52Value": top52_value(dates, closes, position),
+            "marketSum": market_sum,
         }
         for window in RS_WINDOWS:
             record[f"rs{window}"] = average_rs(closes, kospis, position, window)
@@ -435,7 +520,10 @@ def insert_stock_data(
         if stock_code:
             try:
                 series = fetch_daily(stock_code)
-                records = build_stock_data_records(item, series, kospi_close_by_date, base_dates)
+                market_sum = fetch_market_sum(stock_code, stock_item)
+                records = build_stock_data_records(
+                    item, series, kospi_close_by_date, base_dates, market_sum
+                )
                 buffer.extend(records)
                 added = len(records)
                 summary["ok_items"] += 1

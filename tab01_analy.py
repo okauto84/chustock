@@ -34,8 +34,8 @@ MA_FILTERS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# 라벨 -> 신고가(Top52) 대비 허용하는 하락률 상한
-# (Top52 - value) / Top52 이 이 값 이하면 조건 충족
+# 라벨 -> 신고가(top52Value) 대비 허용하는 하락률 상한
+# (top52Value - value) / top52Value 이 이 값 이하면 조건 충족
 TOP52_FILTERS: dict[str, float | None] = {
     "전체": None,
     "5%": 0.05,
@@ -191,7 +191,7 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         api_key,
         STOCK_DATA_TABLE,
         "stockCode,stockItem,date,sectorCode,sectorItem,value,proc,kospi,"
-        "rs20,rs50,ma10,ma20,ma30,ma50,ma100,ma150",
+        "rs20,rs50,ma10,ma20,ma30,ma50,ma100,ma150,top52Value,marketSum",
         filters={"stockItem": "eq.ETF", "date": f"eq.{as_of}"},
         order="stockCode",
     )
@@ -209,7 +209,7 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         if not stock:
             continue  # STOCKS에 없는 시세 행은 조인 대상이 아니다
 
-        if row.get("Top52") not in (None, "", 0, 0.0):
+        if row.get("top52Value") not in (None, "", 0, 0.0):
             has_top52 = True
 
         sector_code = stock.get("sectorCode") or row.get("sectorCode") or "etc"
@@ -277,10 +277,10 @@ def passes_filters(
             return False
 
     if top52_ratio is not None:
-        top52 = record.get("Top52") or 0.0
+        top52 = record.get("top52Value") or 0.0
         if top52 <= 0:
             return False
-        # 신고가 대비 하락률: (Top52 - value) / Top52 이 선택한 % 이내인지 본다
+        # 신고가 대비 하락률: (top52Value - value) / top52Value 이 선택한 % 이내인지 본다
         if (top52 - value) / top52 > top52_ratio:
             return False
 
@@ -636,7 +636,7 @@ def show() -> None:
 
     if not has_top52 and TOP52_FILTERS[top52_label] is not None:
         st.warning(
-            "STOCK_DATA에 Top52 값이 없어 신고가 비율 필터는 '전체'만 유효합니다."
+            "STOCK_DATA에 top52Value 값이 없어 신고가 비율 필터는 '전체'만 유효합니다."
         )
 
     tree = filter_tree(
