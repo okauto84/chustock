@@ -1,10 +1,13 @@
 """분석 탭: STOCK_DATA와 STOCKS를 조인해 ETF·개별 종목을 카드별 트리로 보여준다."""
 
+import builtins
 import itertools
 import json
 import urllib.parse
 from collections import defaultdict
+from contextlib import contextmanager
 
+import pandas as pd
 import streamlit as st
 
 from tab04_adm import (
@@ -79,11 +82,29 @@ ETF_PREFIX = "analytree"
 STOCK_PREFIX = "stocktree"
 
 PICK_KEY = "analy_picked_item"
+CHART_PICK_KEY = "analystk_chart_item"
 PROJECT_KEY = "analy_supabase_project"
 
 STOCKS_TABLE = "STOCKS"
 STOCK_DATA_TABLE = "STOCK_DATA"
 SECTORS_TABLE = "SECTORS"
+
+# 1번 차트: 종가·이동평균선 색/굵기
+PRICE_SERIES = (
+    ("종가", "value", "#1c7ed6", 3),
+    ("MA10", "ma10", "#e67700", 1),
+    ("MA20", "ma20", "#2f9e44", 1),
+    ("MA30", "ma30", "#ae3b61", 1),
+    ("MA50", "ma50", "#7048e8", 1),
+    ("MA100", "ma100", "#0c8599", 1),
+    ("MA150", "ma150", "#868e96", 1),
+)
+
+# 2번 차트: 왼쪽 KOSPI / 오른쪽 RS20
+KOSPI_COLOR = "#e03131"
+RS20_COLOR = "#1971c2"
+CHART_HEIGHT = 360
+CHART_WIDTH = 1100
 
 
 def fetch_paginated(
@@ -281,6 +302,219 @@ def load_stock_bundle(project: str, api_key: str) -> tuple[str | None, dict, dic
     return load_bundle(project, api_key, "neq.ETF", "KS")
 
 
+@st.cache_data(show_spinner="종목 차트를 불러오는 중입니다…", ttl=300)
+def load_stock_series(project: str, api_key: str, stock_code: str) -> list[dict]:
+    """한 종목의 STOCK_DATA 시계열을 날짜 오름차순으로 가져온다."""
+    return fetch_paginated(
+        project,
+        api_key,
+        STOCK_DATA_TABLE,
+        "date,value,ma10,ma20,ma30,ma50,ma100,ma150,kospi,rs20",
+        filters={"stockCode": f"eq.{stock_code}"},
+        order="date.asc",
+    )
+
+
+def _to_chart_date(raw: str) -> str | None:
+    """YYYYMMDD / YYYY-MM-DD 를 lightweight-charts용 YYYY-MM-DD로 바꾼다."""
+    text = str(raw or "").strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return None
+
+
+def _series_frame(rows: list[dict], value_key: str) -> pd.DataFrame:
+    """차트 Line.set용 DataFrame(time, value). 0·결측은 뺀다."""
+    points: list[dict] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        amount = row.get(value_key)
+        if not day or amount in (None, "", 0, 0.0):
+            continue
+        try:
+            points.append({"time": day, "value": float(amount)})
+        except (TypeError, ValueError):
+            continue
+    return pd.DataFrame(points)
+
+
+@contextmanager
+def _utf8_open():
+    """Windows 기본 인코딩(cp949)에서 lightweight-charts JS 읽기 실패를 막는다."""
+    original = builtins.open
+
+    def opener(file, mode="r", *args, **kwargs):
+        if "b" not in mode and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "utf-8"
+        return original(file, mode, *args, **kwargs)
+
+    builtins.open = opener
+    try:
+        yield
+    finally:
+        builtins.open = original
+
+
+def _make_chart() -> "object":
+    """StreamlitChart를 UTF-8로 생성한다."""
+    with _utf8_open():
+        from lightweight_charts.widgets import StreamlitChart
+
+        return StreamlitChart(width=CHART_WIDTH, height=CHART_HEIGHT)
+
+
+def _apply_mmdd_axis(chart) -> None:
+    """X축·크로스헤어 날짜를 MM-DD로 표시한다."""
+    chart.run_script(
+        f"""
+        (function() {{
+            const fmt = (t) => {{
+                if (t && typeof t === 'object' && t.year != null) {{
+                    const m = String(t.month).padStart(2, '0');
+                    const d = String(t.day).padStart(2, '0');
+                    return m + '-' + d;
+                }}
+                const s = String(t || '');
+                return s.length >= 10 ? s.slice(5, 10) : s;
+            }};
+            {chart.id}.chart.applyOptions({{
+                localization: {{ timeFormatter: fmt }},
+                timeScale: {{
+                    timeVisible: false,
+                    secondsVisible: false,
+                    tickMarkFormatter: fmt,
+                }},
+            }});
+        }})();
+        """
+    )
+
+
+def _render_color_legend(items: list[tuple[str, str]]) -> None:
+    """차트 아래 고정 범례(색 점 + 이름)."""
+    chips = " · ".join(
+        f"<span style='color:{color}'>■</span> {name}" for name, color in items
+    )
+    st.markdown(
+        f"<div style='margin:0.2rem 0 0.8rem 0;color:#495057'>{chips}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_price_chart(rows: list[dict], title: str) -> None:
+    """1번 차트: 종가·이동평균선."""
+    st.markdown(f"**종가 · 이동평균선** — {title}")
+    chart = _make_chart()
+    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
+    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
+    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
+    chart.crosshair(mode="normal")
+    chart.hide_data()
+    _apply_mmdd_axis(chart)
+
+    legend_items: list[tuple[str, str]] = []
+    for name, key, color, width in PRICE_SERIES:
+        frame = _series_frame(rows, key)
+        if frame.empty:
+            continue
+        line = chart.create_line(
+            name,
+            color=color,
+            width=width,
+            price_line=False,
+            price_label=False,
+        )
+        line.set(frame.rename(columns={"value": name}))
+        legend_items.append((name, color))
+
+    if not legend_items:
+        st.info("그릴 종가·이동평균 데이터가 없습니다.")
+        return
+    chart.fit()
+    chart.load()
+    _render_color_legend(legend_items)
+
+
+def _render_rs_chart(rows: list[dict], title: str) -> None:
+    """2번 차트: 왼쪽 KOSPI · 오른쪽 RS20."""
+    st.markdown(f"**KOSPI · RS20** — {title}")
+    kospi = _series_frame(rows, "kospi")
+    rs20 = _series_frame(rows, "rs20")
+    if kospi.empty and rs20.empty:
+        st.info("그릴 KOSPI·RS20 데이터가 없습니다.")
+        return
+
+    chart = _make_chart()
+    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
+    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
+    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
+    chart.crosshair(mode="normal")
+    chart.hide_data()
+    _apply_mmdd_axis(chart)
+    chart.run_script(
+        f"""
+        {chart.id}.chart.applyOptions({{
+            leftPriceScale: {{ visible: true, borderVisible: true }},
+            rightPriceScale: {{ visible: true, borderVisible: true }},
+        }});
+        """
+    )
+
+    legend_items: list[tuple[str, str]] = []
+    if not kospi.empty:
+        line = chart.create_line(
+            "KOSPI",
+            color=KOSPI_COLOR,
+            width=2,
+            price_line=False,
+            price_label=False,
+            price_scale_id="left",
+        )
+        line.set(kospi.rename(columns={"value": "KOSPI"}))
+        legend_items.append(("KOSPI", KOSPI_COLOR))
+    if not rs20.empty:
+        line = chart.create_line(
+            "RS20",
+            color=RS20_COLOR,
+            width=2,
+            price_line=False,
+            price_label=False,
+            price_scale_id="right",
+        )
+        line.set(rs20.rename(columns={"value": "RS20"}))
+        legend_items.append(("RS20", RS20_COLOR))
+
+    chart.fit()
+    chart.load()
+    _render_color_legend(legend_items)
+
+
+def _render_stock_charts(project: str, api_key: str) -> None:
+    """개별 종목 트리에서 고른 종목의 1·2번 차트를 트리 아래에 그린다."""
+    picked = st.session_state.get(CHART_PICK_KEY)
+    if not picked:
+        return
+
+    itemcode = picked["itemcode"]
+    itemname = picked.get("itemname") or itemcode
+    title = f"{itemname} ({itemcode})"
+    try:
+        rows = load_stock_series(project, api_key, itemcode)
+    except Exception as error:  # 연결·권한 오류를 화면에 그대로 보여준다
+        st.error(f"차트 데이터 조회 실패 — {error}")
+        return
+    if not rows:
+        st.info(f"{title} 의 STOCK_DATA 시계열이 없습니다.")
+        return
+
+    st.divider()
+    st.markdown(f"**차트** — {title} · {len(rows)}거래일")
+    _render_price_chart(rows, title)
+    _render_rs_chart(rows, title)
+
+
 # 카드(보드)마다 다른 CSS 접두어·세션 키·그리드 구성을 한곳에 모아 둔다
 ETF_BOARD: dict = {
     "kind": "etf",
@@ -429,6 +663,9 @@ def _reset_board(board: dict) -> None:
     st.session_state[board["limit_key"]] = {}
     if board["kind"] == "etf":
         st.session_state[PICK_KEY] = None
+    else:
+        st.session_state[CHART_PICK_KEY] = None
+        load_stock_series.clear()
 
 
 def _pick_holding(pills_key: str, itemcode: str) -> None:
@@ -440,6 +677,11 @@ def _pick_holding(pills_key: str, itemcode: str) -> None:
     for key in list(st.session_state):
         if str(key).startswith("analy_pills_") and key != pills_key:
             st.session_state[key] = None
+
+
+def _pick_stock_chart(itemcode: str, itemname: str) -> None:
+    """개별 종목 트리에서 종목명을 누르면 차트 대상을 기억한다."""
+    st.session_state[CHART_PICK_KEY] = {"itemcode": itemcode, "itemname": itemname}
 
 
 def _row_prefix(prefix: str, flags: tuple[bool, ...]) -> str:
@@ -644,13 +886,28 @@ def _render_more(board: dict, row: dict) -> None:
 def _render_leaf(board: dict, itemcode: str, item: dict, record: dict | None) -> None:
     """한 종목: 종목·시가총액·종가·신고가와 카드별 나머지 칸을 한 행에 그린다."""
     cols = st.columns(board["ratio"], vertical_alignment="center")
+    itemname = item.get("stockName") or item.get("itemname") or itemcode
     with cols[0]:
-        itemname = item.get("stockName") or item.get("itemname") or itemcode
-        st.markdown(
-            f":material/description: {itemname}<br>"
-            f"<span style='color:#868e96;margin-left:1.4em'>{itemcode}</span>",
-            unsafe_allow_html=True,
-        )
+        if board["kind"] == "stock":
+            st.button(
+                itemname,
+                icon=":material/description:",
+                key=f"{board['widget']}_chart_{itemcode}",
+                on_click=_pick_stock_chart,
+                args=(itemcode, itemname),
+                type="tertiary",
+                width="content",
+            )
+            st.markdown(
+                f"<span style='color:#868e96;margin-left:1.4em'>{itemcode}</span>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f":material/description: {itemname}<br>"
+                f"<span style='color:#868e96;margin-left:1.4em'>{itemcode}</span>",
+                unsafe_allow_html=True,
+            )
     with cols[1]:
         st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
     with cols[2]:
@@ -860,6 +1117,8 @@ def _render_board(board: dict, project: str, api_key: str) -> None:
 
     if board["kind"] == "etf":
         _render_picked(items, build_holder_index(items))
+    else:
+        _render_stock_charts(project, api_key)
 
 
 def show() -> None:
