@@ -406,6 +406,40 @@ def _price_reference_levels(rows: list[dict], frame: pd.DataFrame) -> dict[str, 
     return levels
 
 
+def _top52_gap_label(rows: list[dict]) -> tuple[str, float] | None:
+    """52주 신고가·현재가·갭 안내 문구와 표시 Y좌표를 만든다."""
+    series: list[tuple[str, float, dict]] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        close = _as_float(row.get("value"))
+        if day and close is not None:
+            series.append((day, close, row))
+    if not series:
+        return None
+
+    current_day, current_close, latest_row = series[-1]
+    top52 = _as_float(latest_row.get("top52Value"))
+    if top52 is None or top52 <= 0:
+        return None
+
+    high_day = None
+    for day, close, _ in reversed(series):
+        if abs(close - top52) < 0.01:
+            high_day = day
+            break
+    if high_day is None:
+        # top52와 일치하는 날이 없으면 구간 내 최고 종가일을 쓴다
+        high_day, _, _ = max(series, key=lambda item: item[1])
+
+    gap_pct = (current_close - top52) / top52 * 100
+    label = (
+        f"52주 신고가({high_day}): {top52:,.0f}\n"
+        f"현재({current_day}): {current_close:,.0f}\n"
+        f"갭: 신고가 대비 {gap_pct:.0f}%"
+    )
+    return label, (top52 + current_close) / 2
+
+
 def _volume_dataframe(rows: list[dict]) -> pd.DataFrame:
     """거래량 막대용 DataFrame. 전일 대비 증감 색 구분 포함."""
     records: list[dict] = []
@@ -475,19 +509,65 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         y_kwargs["scale"] = alt.Scale(domain=y_domain, nice=False, zero=False)
     y_enc = alt.Y("가격:Q", **y_kwargs)
     price_x = alt.X("날짜:N", sort=date_order, axis=price_x_axis)
+    series_order = [label for label, _ in PRICE_SERIES if label in frame.columns]
+    hover = alt.selection_point(
+        nearest=True,
+        on="pointerover",
+        fields=["날짜"],
+        empty=False,
+        clear="pointerout",
+    )
     lines = (
         alt.Chart(long)
         .mark_line()
         .encode(
             x=price_x,
             y=y_enc,
-            color=alt.Color("구분:N", title=""),
+            color=alt.Color(
+                "구분:N",
+                title=None,
+                scale=alt.Scale(domain=series_order),
+                legend=alt.Legend(
+                    orient="top",
+                    direction="horizontal",
+                    title=None,
+                ),
+            ),
         )
+    )
+    # 투명 포인트로 날짜 호버를 잡고, 해당 날짜의 꺾은선 점만 표시한다
+    hover_selectors = (
+        alt.Chart(long)
+        .mark_point(size=80)
+        .encode(x=price_x, opacity=alt.value(0))
+        .add_params(hover)
+    )
+    hover_points = (
+        alt.Chart(long)
+        .mark_circle(size=55)
+        .encode(
+            x=price_x,
+            y=y_enc,
+            color=alt.Color("구분:N", scale=alt.Scale(domain=series_order), legend=None),
+            opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+            tooltip=[
+                alt.Tooltip("날짜:N", title="날짜"),
+                alt.Tooltip("구분:N", title="구분"),
+                alt.Tooltip("가격:Q", title="가격", format=",.0f"),
+            ],
+        )
+    )
+    hover_rule = (
+        alt.Chart(long)
+        .mark_rule(color="#adb5bd", strokeWidth=1)
+        .encode(x=price_x)
+        .transform_filter(hover)
     )
 
     levels = _price_reference_levels(rows, frame)
-    layers: list[alt.Chart] = [lines]
+    layers: list[alt.Chart] = [lines, hover_selectors, hover_rule, hover_points]
     if levels:
+        # 가로선은 모두 긋고, 왼쪽 짧은 라벨은 구간최고만 (신고가·갭은 오른쪽 문구로)
         present = [name for name in PRICE_REF_COLORS if name in levels]
         ref = pd.DataFrame(
             [
@@ -511,39 +591,36 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
                 color=alt.Color("기준:N", scale=color_scale, legend=None),
             )
         )
-        labels = (
-            alt.Chart(ref)
-            .mark_text(align="left", dx=4, dy=-6, fontSize=11)
-            .encode(
-                x=alt.value(0),
-                y=y_enc,
-                text="라벨:N",
-                color=alt.Color("기준:N", scale=color_scale, legend=None),
+        label_names = [name for name in present if name == "구간최고"]
+        layers.append(rules)
+        if label_names:
+            label_ref = ref[ref["기준"].isin(label_names)]
+            layers.append(
+                alt.Chart(label_ref)
+                .mark_text(align="left", dx=4, dy=-6, fontSize=11)
+                .encode(
+                    x=alt.value(0),
+                    y=y_enc,
+                    text="라벨:N",
+                    color=alt.Color("기준:N", scale=color_scale, legend=None),
+                )
             )
-        )
-        layers.extend([rules, labels])
 
-        top52 = levels.get("52주신고가")
-        latest = levels.get("최근종가")
-        if top52 and latest and top52 > 0 and date_order:
-            gap_pct = (top52 - latest) / top52 * 100
+        gap_info = _top52_gap_label(rows)
+        if gap_info and date_order:
+            gap_text, gap_y = gap_info
             gap = pd.DataFrame(
-                [
-                    {
-                        "날짜": date_order[-1],
-                        "가격": (top52 + latest) / 2,
-                        "라벨": f"갭 {gap_pct:.1f}%",
-                    }
-                ]
+                [{"날짜": date_order[-1], "가격": gap_y, "라벨": gap_text}]
             )
             layers.append(
                 alt.Chart(gap)
                 .mark_text(
                     align="right",
+                    baseline="middle",
                     dx=-6,
-                    fontSize=13,
-                    fontWeight="bold",
-                    color="#495057",
+                    fontSize=10,
+                    color="#c92a2a",
+                    lineBreak="\n",
                 )
                 .encode(
                     x=price_x,
