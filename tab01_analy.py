@@ -349,6 +349,28 @@ def _row_prefix(flags: tuple[bool, ...]) -> str:
 def _guide_css() -> str:
     """깊이·형제 위치 조합마다 세로선과 꺾임선을 배경으로 그리는 CSS."""
     rules = [
+        # 트리 헤더(종목 / 구성 종목): 글자 높이에 맞게 세로 여백 축소
+        f'div[class*="st-key-{ROW_PREFIX}-header"] {{'
+        " padding: 0.15rem 0 0.2rem 0 !important; margin: 0 0 0.25rem 0 !important;"
+        " gap: 0 !important; border-bottom: 1px solid rgba(49, 51, 63, 0.2); }",
+        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        " [data-testid='stHorizontalBlock'] {"
+        " gap: 0.5rem !important; align-items: center !important;"
+        " min-height: 0 !important; }",
+        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        " [data-testid='stColumn'] {"
+        " padding-top: 0 !important; padding-bottom: 0 !important;"
+        " min-height: 0 !important; }",
+        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        " [data-testid='stMarkdownContainer'],"
+        f' div[class*="st-key-{ROW_PREFIX}-header"]'
+        " [data-testid='stMarkdownContainer'] p {"
+        " margin: 0 !important; padding: 0 !important;"
+        " line-height: 1.2 !important; }",
+        # TREE_CSS 주입용 markdown이 빈 세로 공간을 차지하지 않게 함
+        '[data-testid="stMarkdownContainer"]:has(> style):not(:has(> :not(style))) {'
+        " display: none !important; height: 0 !important;"
+        " margin: 0 !important; padding: 0 !important; }",
         f'div[class*="st-key-{ROW_PREFIX}-"] button {{'
         " padding-top: 0; padding-bottom: 0; min-height: 1.5rem;"
         " width: auto !important; max-width: 100%; }",
@@ -532,10 +554,10 @@ def _render_tree(
     values: dict[str, dict],
 ) -> None:
     st.markdown(TREE_CSS, unsafe_allow_html=True)
-    header_cols = st.columns(GRID_RATIO)
-    header_cols[0].markdown("**종목**")
-    header_cols[1].markdown("**구성 종목**")
-    st.divider()
+    with st.container(key=f"{ROW_PREFIX}-header", gap=0):
+        header_cols = st.columns(GRID_RATIO, gap="small")
+        header_cols[0].markdown("**종목**")
+        header_cols[1].markdown("**구성 종목**")
 
     if not tree:
         st.info("조건을 만족하는 종목이 없습니다.")
@@ -655,7 +677,7 @@ def show() -> None:
         f"신고가 비율 {top52_label} → {matched}/{total}종목"
     )
 
-    with st.container(border=True):
+    with st.container(border=True, gap=0):
         _render_tree(tree, etfs, values)
 
     _render_picked(etfs, build_holder_index(etfs))

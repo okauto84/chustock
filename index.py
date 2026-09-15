@@ -55,7 +55,7 @@ st.markdown(
         margin-bottom: 0 !important;
         padding: 0.35rem 0.5rem 0 0.5rem !important;
         border-bottom: 1px solid #cfd4dc;
-        background: #eef1f5;
+        background: #ffffff;
         border-radius: 6px 6px 0 0;
     }
 
@@ -76,7 +76,7 @@ st.markdown(
         border: 1px solid transparent !important;
         border-bottom: none !important;
         border-radius: 6px 6px 0 0 !important;
-        background: #eef1f5 !important;
+        background: #ffffff !important;
         color: #5c6570 !important;
         font-weight: 600 !important;
         line-height: 1.2 !important;
