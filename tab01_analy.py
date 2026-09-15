@@ -589,11 +589,7 @@ def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
     )
     with tree_col:
         itemname = item.get("stockName") or item.get("itemname") or itemcode
-        st.markdown(
-            f":material/description: {itemname}"
-            f" <span style='color:#868e96'>{itemcode}</span>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f":material/description: {itemname}")
     with market_col:
         st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
     with value_col:
@@ -625,12 +621,16 @@ def _render_tree(
     tree: dict[str, dict[str, list[str]]],
     etfs: dict[str, dict],
     values: dict[str, dict],
+    matched: int,
 ) -> None:
     st.markdown(TREE_CSS, unsafe_allow_html=True)
     with st.container(key=f"{ROW_PREFIX}-header", gap=0):
         header_cols = st.columns(GRID_RATIO, gap="small")
         for col, title in zip(header_cols, GRID_HEADERS):
-            col.markdown(f"**{title}**")
+            if title == "종목":
+                col.markdown(f"**{title} ({matched})**")
+            else:
+                col.markdown(f"**{title}**")
 
     if not tree:
         st.info("조건을 만족하는 종목이 없습니다.")
@@ -774,6 +774,6 @@ def show() -> None:
     )
 
     with st.container(border=True, gap=0):
-        _render_tree(tree, etfs, values)
+        _render_tree(tree, etfs, values, matched)
 
     _render_picked(etfs, build_holder_index(etfs))
