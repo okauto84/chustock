@@ -37,10 +37,10 @@ MA_FILTERS: dict[str, tuple[str, ...]] = {
 # 라벨 -> 거래량(proc) 다음으로 이어서 비교할 거래량 이동평균 키
 PROC_FILTERS: dict[str, tuple[str, ...]] = {
     "전체": (),
-    ">proc10": ("proc10",),
-    ">proc10>proc20": ("proc10", "proc20"),
-    ">proc10>proc20>proc30": ("proc10", "proc20", "proc30"),
-    ">proc10>proc20>proc30>proc50": ("proc10", "proc20", "proc30", "proc50"),
+    "거래량>proc10": ("proc10",),
+    "거래량>proc10>proc20": ("proc10", "proc20"),
+    "거래량>proc10>proc20>proc30": ("proc10", "proc20", "proc30"),
+    "거래량>proc10>proc20>proc30>proc50": ("proc10", "proc20", "proc30", "proc50"),
 }
 
 # 라벨 -> 신고가(top52Value) 대비 허용하는 하락률 상한
@@ -589,7 +589,11 @@ def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
     )
     with tree_col:
         itemname = item.get("stockName") or item.get("itemname") or itemcode
-        st.markdown(f":material/description: {itemname}")
+        st.markdown(
+            f":material/description: {itemname}<br>"
+            f"<span style='color:#868e96;margin-left:1.4em'>{itemcode}</span>",
+            unsafe_allow_html=True,
+        )
     with market_col:
         st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
     with value_col:
