@@ -768,7 +768,7 @@ ETF_BOARD: dict = {
     "prefix": ETF_PREFIX,
     "widget": "analy",
     "loader": load_etf_bundle,
-    "source": "STOCK_DATA(ETF) ⨝ STOCKS",
+    "source": " ",
     "ratio": (3, 1, 1, 4),  # 종목 : 종가 : 52주 신고가 : 구성 종목
     "headers": ("종목", "종가", "52주 신고가", "구성 종목"),
     "ma_key": "analy_ma",
@@ -785,7 +785,7 @@ STOCK_BOARD: dict = {
     "prefix": STOCK_PREFIX,
     "widget": "analystk",
     "loader": load_stock_bundle,
-    "source": "STOCK_DATA(KS·KQ) ⨝ STOCKS",
+    "source": " ",
     "ratio": (3, 1, 1, 1, 1),  # 종목 : 종가 : 52주 신고가 : RS20 : RS50
     "headers": ("종목", "종가", "52주 신고가", "RS20", "RS50"),
     "ma_key": "analystk_ma",
@@ -979,6 +979,11 @@ def _guide_css(prefix: str) -> str:
         f'div[class*="st-key-{prefix}-"] p {{ margin-bottom: 0; }}',
         f'div[class*="st-key-{prefix}-"] [data-testid="stIconMaterial"]'
         " { font-size: 15px !important; }",
+        # 최하위 종목 행: 가로 구분선으로 row 구분
+        f'div[class*="st-key-{prefix}-"][class*="-leaf-"] {{'
+        " border-bottom: 1px solid rgba(49, 51, 63, 0.14);"
+        " padding-top: 0.25rem !important;"
+        " padding-bottom: 0.25rem !important; }",
     ]
     for depth in range(1, MAX_DEPTH + 1):
         for flags in itertools.product((False, True), repeat=depth):
@@ -1205,7 +1210,10 @@ def _render_tree(
     limits: dict[str, int] = st.session_state.setdefault(board["limit_key"], {})
     with st.container(gap=0):
         for index, row in enumerate(_tree_rows(tree, opened, limits)):
-            with st.container(key=f"{_row_prefix(prefix, row['flags'])}-{index}", gap=0):
+            row_key = f"{_row_prefix(prefix, row['flags'])}-{index}"
+            if row["kind"] == "leaf":
+                row_key = f"{_row_prefix(prefix, row['flags'])}-leaf-{index}"
+            with st.container(key=row_key, gap=0):
                 if row["kind"] == "branch":
                     _render_branch(board, row, opened)
                 elif row["kind"] == "leaf":
