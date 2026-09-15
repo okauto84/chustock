@@ -103,8 +103,7 @@ PRICE_SERIES = (
 # 2번 차트: 왼쪽 KOSPI / 오른쪽 RS20
 KOSPI_COLOR = "#e03131"
 RS20_COLOR = "#1971c2"
-CHART_HEIGHT = 360
-CHART_WIDTH = 1100
+CHART_HEIGHT = 400  # iframe 세로. 가로는 컨테이너 너비에 맞춰 늘어난다.
 
 
 def fetch_paginated(
@@ -358,40 +357,34 @@ def _utf8_open():
 
 
 def _make_chart():
-    """고정 크기 StreamlitChart를 만든다. autosize는 iframe에서 폭 0이 되어 선이 안 보인다."""
+    """lightweight-charts-python StreamlitChart를 만든다. 가로는 부모 너비에 맞춘다."""
     with _utf8_open():
-        from lightweight_charts.widgets import StaticLWC, StreamlitChart
+        from lightweight_charts.widgets import StreamlitChart
 
-        chart = object.__new__(StreamlitChart)
-        # StreamlitChart는 autosize=True만 넘기므로 StaticLWC를 직접 초기한다
-        StaticLWC.__init__(
-            chart,
-            width=CHART_WIDTH,
-            height=CHART_HEIGHT,
-            inner_width=1,
-            inner_height=1,
-            scale_candles_only=False,
-            toolbox=False,
-            autosize=False,
-        )
+        chart = StreamlitChart(height=CHART_HEIGHT)
 
     chart.run_script(
         f"""
         (function() {{
             const box = document.getElementById('container');
-            if (box) {{
-                box.style.width = '{CHART_WIDTH}px';
+            const sync = () => {{
+                if (!box || !{chart.id} || !{chart.id}.chart) return;
+                const w = Math.max(box.clientWidth || window.innerWidth || 640, 320);
+                box.style.width = '100%';
                 box.style.height = '{CHART_HEIGHT}px';
                 box.style.overflow = 'hidden';
-                box.style.borderRadius = '4px';
+                {chart.id}.chart.resize(w, {CHART_HEIGHT});
+                {chart.id}.chart.timeScale().fitContent();
+            }};
+            if (box) {{
+                box.style.width = '100%';
+                box.style.height = '{CHART_HEIGHT}px';
             }}
-            if ({chart.id} && {chart.id}.chart) {{
-                {chart.id}.chart.resize({CHART_WIDTH}, {CHART_HEIGHT});
+            sync();
+            window.addEventListener('resize', sync);
+            if (typeof ResizeObserver !== 'undefined' && box) {{
+                new ResizeObserver(sync).observe(box);
             }}
-            document.querySelectorAll('.tv-lightweight-charts').forEach((el) => {{
-                el.style.width = '{CHART_WIDTH}px';
-                el.style.height = '{CHART_HEIGHT}px';
-            }});
         }})();
         """
     )
@@ -401,6 +394,34 @@ def _make_chart():
     chart.crosshair(mode="normal")
     chart.time_scale(visible=True, time_visible=False, seconds_visible=False)
     return chart
+
+
+def _load_chart(chart) -> None:
+    """StreamlitChart.load() 대신 srcdoc iframe으로 안전하게 삽입한다.
+
+    components.html에 인라인 JS를 그대로 넣으면 스크립트가 끊겨 차트가 빈 칸으로 남는다.
+    lightweight-charts-python JupyterChart와 같이 HTML을 escape한 srcdoc을 쓴다.
+    가로는 100%(동적), 세로는 CHART_HEIGHT.
+    """
+    import html as html_lib
+
+    import streamlit.components.v1 as components
+
+    if chart.win.loaded:
+        return
+    chart.win.loaded = True
+    for script in chart.win.final_scripts:
+        chart._html += "\n" + script
+
+    full_doc = f"{chart._html}</script></body></html>"
+    escaped = html_lib.escape(full_doc)
+    components.html(
+        f'<iframe title="lightweight-charts" '
+        f'style="width:100%;height:{CHART_HEIGHT}px;border:0;overflow:hidden;" '
+        f'srcdoc="{escaped}"></iframe>',
+        height=CHART_HEIGHT,
+        scrolling=False,
+    )
 
 
 def _close_ohlc_frame(rows: list[dict]) -> pd.DataFrame:
@@ -466,7 +487,7 @@ def _render_color_legend(items: list[tuple[str, str]]) -> None:
 
 
 def _render_price_chart(rows: list[dict], title: str) -> None:
-    """1번 차트: 종가·이동평균선."""
+    """1번 차트: 종가·이동평균선 (lightweight-charts-python)."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
     base = _close_ohlc_frame(rows)
     if base.empty:
@@ -497,12 +518,12 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         st.info("그릴 종가·이동평균 데이터가 없습니다.")
         return
     chart.fit()
-    chart.load()
+    _load_chart(chart)
     _render_color_legend(legend_items)
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
-    """2번 차트: 왼쪽 KOSPI · 오른쪽 RS20."""
+    """2번 차트: 왼쪽 KOSPI · 오른쪽 RS20 (lightweight-charts-python)."""
     st.markdown(f"**KOSPI · RS20** — {title}")
     kospi = _series_frame(rows, "kospi")
     rs20 = _series_frame(rows, "rs20")
@@ -560,7 +581,7 @@ def _render_rs_chart(rows: list[dict], title: str) -> None:
         legend_items.append(("RS20", RS20_COLOR))
 
     chart.fit()
-    chart.load()
+    _load_chart(chart)
     _render_color_legend(legend_items)
 
 
