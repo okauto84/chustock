@@ -811,7 +811,27 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
         _render_stock_data_result(st.session_state["adm_stock_data_result"])
 
 
+@st.dialog("관리자 인증")
+def _admin_login_dialog() -> None:
+    """관리 탭 진입 시 secrets의 ADMIN_PW와 비밀번호를 대조한다."""
+    password = st.text_input("관리자 비밀번호", type="password", key="adm_pw_input")
+    if st.button("확인", type="primary", use_container_width=True):
+        expected = _secret("ADMIN_PW")
+        if not expected:
+            st.error("secrets에 ADMIN_PW가 없습니다.")
+        elif password == expected:
+            st.session_state["adm_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 올바르지 않습니다.")
+
+
 def show() -> None:
+    if not st.session_state.get("adm_authenticated"):
+        _admin_login_dialog()
+        st.info("관리 기능을 사용하려면 관리자 비밀번호를 입력하세요.")
+        return
+
     st.subheader("관리")
     st.caption(
         "기준 데이터(SECTORS·STOCKS)와 시세 지표(STOCK_DATA)를 Supabase에 적재합니다. "
