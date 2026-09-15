@@ -48,8 +48,9 @@ TOP52_FILTERS: dict[str, float | None] = {
     "50%": 0.50,
 }
 
-# 라벨 -> 시가총액(marketSum, 억원) 하한
-MARKET_SUM_FILTERS: dict[str, float] = {
+# 라벨 -> 시가총액(marketSum, 억원) 하한. None이면 시가총액 조건 없음
+MARKET_SUM_FILTERS: dict[str, float | None] = {
+    "전체": None,
     "1000억 이상": 1000,
     "5000억 이상": 5000,
     "1조 이상": 10000,
@@ -268,7 +269,7 @@ def passes_filters(
     record: dict | None,
     ma_keys: tuple[str, ...],
     top52_ratio: float | None,
-    market_sum_min: float,
+    market_sum_min: float | None,
 ) -> bool:
     """최근 지표 레코드가 콤보박스 조건을 모두 만족하는지 본다."""
     if record is None:
@@ -278,10 +279,11 @@ def passes_filters(
     if value <= 0:
         return False
 
-    # marketSum 단위는 억원
-    market_sum = record.get("marketSum") or 0.0
-    if market_sum < market_sum_min:
-        return False
+    # marketSum 단위는 억원. '전체'면 시가총액 조건을 건너뛴다
+    if market_sum_min is not None:
+        market_sum = record.get("marketSum") or 0.0
+        if market_sum < market_sum_min:
+            return False
 
     if ma_keys:
         averages = [record.get(key) or 0.0 for key in ma_keys]
@@ -308,7 +310,7 @@ def filter_tree(
     values: dict[str, dict],
     ma_keys: tuple[str, ...],
     top52_ratio: float | None,
-    market_sum_min: float,
+    market_sum_min: float | None,
 ) -> dict[str, dict[str, list[str]]]:
     """조건을 만족하는 ETF만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
     tree: dict[str, dict[str, list[str]]] = {}
@@ -647,7 +649,7 @@ def show() -> None:
         st.error(f"ETF 데이터 조회 실패 — {load_error}")
         return
 
-    ma_col, top52_col, market_col, button_col = st.columns(
+    ma_col, market_col, top52_col, button_col = st.columns(
         [3, 2, 2, 1], vertical_alignment="bottom"
     )
     with ma_col:
@@ -659,20 +661,20 @@ def show() -> None:
             filter_mode=None,
             persist_state="session",
         )
-    with top52_col:
-        top52_label = st.selectbox(
-            "52주 신고가 비율",
-            list(TOP52_FILTERS),
-            key=TOP52_KEY,
-            accept_new_options=False,
-            filter_mode=None,
-            persist_state="session",
-        )
     with market_col:
         market_label = st.selectbox(
             "시가총액",
             list(MARKET_SUM_FILTERS),
             key=MARKET_SUM_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
+        )
+    with top52_col:
+        top52_label = st.selectbox(
+            "52주 신고가 비율",
+            list(TOP52_FILTERS),
+            key=TOP52_KEY,
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",

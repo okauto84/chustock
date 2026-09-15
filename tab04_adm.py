@@ -54,6 +54,10 @@ STOCK_DATA_COLUMNS = (
     "sectorItem",
     "value",
     "proc",
+    "proc10",
+    "proc20",
+    "proc30",
+    "proc50",
     "kospi",
     "rs20",
     "rs50",
@@ -94,6 +98,7 @@ LOOKBACK_DAYS = 900  # 기준일 + ma150·rs50 계산에 필요한 여유 기간
 MAX_TRADING_DAYS = 250
 MA_WINDOWS = (10, 20, 30, 50, 100, 150)
 RS_WINDOWS = (20, 50)
+PROC_WINDOWS = (10, 20, 30, 50)
 SLEEP_SEC = 1
 SLEEP_EVERY = 50
 
@@ -390,6 +395,14 @@ def moving_average(closes: list[float], end_index: int, window: int) -> float:
     return round(sum(closes[start : end_index + 1]) / window, 2)
 
 
+def average_volume(volumes: list[int], end_index: int, window: int) -> int:
+    """end_index를 포함한 최근 window 거래일의 거래량 평균."""
+    start = end_index - window + 1
+    if start < 0:
+        return 0
+    return round(sum(volumes[start : end_index + 1]) / window)
+
+
 def daily_rs(closes: list[float], kospis: list[float], index: int) -> float | None:
     """전일 대비 종가 변화율을 코스피 변화율로 나눈 일별 RS(100=시장과 동일)."""
     if index < 1:
@@ -477,6 +490,8 @@ def build_stock_data_records(
             record[f"rs{window}"] = average_rs(closes, kospis, position, window)
         for window in MA_WINDOWS:
             record[f"ma{window}"] = moving_average(closes, position, window)
+        for window in PROC_WINDOWS:
+            record[f"proc{window}"] = average_volume(volumes, position, window)
         records.append(record)
     return records
 
