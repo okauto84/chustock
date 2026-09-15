@@ -769,8 +769,8 @@ ETF_BOARD: dict = {
     "widget": "analy",
     "loader": load_etf_bundle,
     "source": "STOCK_DATA(ETF) ⨝ STOCKS",
-    "ratio": (3, 1, 1, 1, 4),  # 종목 : 시가총액 : 종가 : 52주 신고가 : 구성 종목
-    "headers": ("종목", "시가총액", "종가", "52주 신고가", "구성 종목"),
+    "ratio": (3, 1, 1, 4),  # 종목 : 종가 : 52주 신고가 : 구성 종목
+    "headers": ("종목", "종가", "52주 신고가", "구성 종목"),
     "ma_key": "analy_ma",
     "proc_key": "analy_proc",
     "top52_key": "analy_top52",
@@ -786,8 +786,8 @@ STOCK_BOARD: dict = {
     "widget": "analystk",
     "loader": load_stock_bundle,
     "source": "STOCK_DATA(KS·KQ) ⨝ STOCKS",
-    "ratio": (3, 1, 1, 1, 1, 1),  # 종목 : 시가총액 : 종가 : 52주 신고가 : RS20 : RS50
-    "headers": ("종목", "시가총액", "종가", "52주 신고가", "RS20", "RS50"),
+    "ratio": (3, 1, 1, 1, 1),  # 종목 : 종가 : 52주 신고가 : RS20 : RS50
+    "headers": ("종목", "종가", "52주 신고가", "RS20", "RS50"),
     "ma_key": "analystk_ma",
     "proc_key": "analystk_proc",
     "top52_key": "analystk_top52",
@@ -1070,16 +1070,6 @@ def _tree_rows(
     return rows
 
 
-def _fmt_market_sum(value: float | int | None) -> str:
-    """시가총액(억원)을 화면용 문자열로 만든다."""
-    if value in (None, "", 0, 0.0):
-        return "-"
-    amount = float(value)
-    if amount >= 10000:
-        return f"{amount / 10000:,.1f}조"
-    return f"{amount:,.0f}억"
-
-
 def _fmt_price(value: float | int | None) -> str:
     """종가·신고가 숫자를 화면용 문자열로 만든다."""
     if value in (None, "", 0, 0.0):
@@ -1130,7 +1120,7 @@ def _render_more(board: dict, row: dict) -> None:
 
 
 def _render_leaf(board: dict, itemcode: str, item: dict, record: dict | None) -> None:
-    """한 종목: 종목·시가총액·종가·신고가와 카드별 나머지 칸을 한 행에 그린다."""
+    """한 종목: 종목·종가·신고가와 카드별 나머지 칸을 한 행에 그린다."""
     cols = st.columns(board["ratio"], vertical_alignment="center")
     itemname = item.get("stockName") or item.get("itemname") or itemcode
     with cols[0]:
@@ -1155,18 +1145,16 @@ def _render_leaf(board: dict, itemcode: str, item: dict, record: dict | None) ->
                 unsafe_allow_html=True,
             )
     with cols[1]:
-        st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
-    with cols[2]:
         st.markdown(_fmt_price(record.get("value") if record else None))
-    with cols[3]:
+    with cols[2]:
         st.markdown(_fmt_price(record.get("top52Value") if record else None))
     if board["kind"] == "etf":
-        with cols[4]:
+        with cols[3]:
             _render_holdings(itemcode, item)
     else:
-        with cols[4]:
+        with cols[3]:
             st.markdown(_fmt_rs(record.get("rs20") if record else None))
-        with cols[5]:
+        with cols[4]:
             st.markdown(_fmt_rs(record.get("rs50") if record else None))
 
 
