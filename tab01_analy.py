@@ -613,15 +613,16 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         gap_info = _top52_gap_label(rows)
         if gap_info and date_order:
             gap_text, gap_y = gap_info
+            # 신고가·현재가 점선 사이(Y), 차트 가로 중앙(X)에 표시
+            mid_day = date_order[len(date_order) // 2]
             gap = pd.DataFrame(
-                [{"날짜": date_order[-1], "가격": gap_y, "라벨": gap_text}]
+                [{"날짜": mid_day, "가격": gap_y, "라벨": gap_text}]
             )
             layers.append(
                 alt.Chart(gap)
                 .mark_text(
-                    align="right",
+                    align="center",
                     baseline="middle",
-                    dx=-6,
                     fontSize=10,
                     color="#c92a2a",
                     lineBreak="\n",
