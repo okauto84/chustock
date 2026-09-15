@@ -104,6 +104,10 @@ RS_SERIES = (
     ("KOSPI", "kospi"),
     ("RS20", "rs20"),
 )
+RS_CHART_COLORS = {
+    "KOSPI": "#e03131",
+    "RS20": "#1971c2",
+}
 
 CHART_HEIGHT = 400
 VOLUME_CHART_HEIGHT = 140
@@ -664,20 +668,71 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
-    """2번 차트: KOSPI·RS20 (Streamlit 기본 꺾은선)."""
+    """2번 차트: KOSPI(좌)·RS20(우) 이중 Y축 꺾은선."""
     st.markdown(f"**KOSPI · RS20** — {title}")
     frame = _chart_dataframe(rows, RS_SERIES)
     if frame.empty or frame.dropna(how="all").empty:
         st.info("그릴 KOSPI·RS20 데이터가 없습니다.")
         return
-    st.line_chart(
-        frame,
-        x_label="날짜",
-        y_label="지수",
-        color=["#e03131", "#1971c2"][: len(frame.columns)],
-        width="stretch",
-        height=CHART_HEIGHT,
+
+    date_order = list(frame.index)
+    layers: list[alt.Chart] = []
+
+    if "KOSPI" in frame.columns:
+        kospi = frame.reset_index()[["날짜", "KOSPI"]].dropna()
+        if not kospi.empty:
+            layers.append(
+                alt.Chart(kospi)
+                .mark_line(color=RS_CHART_COLORS["KOSPI"])
+                .encode(
+                    x=alt.X("날짜:N", sort=date_order, title="날짜"),
+                    y=alt.Y(
+                        "KOSPI:Q",
+                        title="KOSPI",
+                        scale=alt.Scale(zero=False, nice=True),
+                        axis=alt.Axis(titleColor=RS_CHART_COLORS["KOSPI"]),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("날짜:N", title="날짜"),
+                        alt.Tooltip("KOSPI:Q", title="KOSPI", format=",.2f"),
+                    ],
+                )
+            )
+
+    if "RS20" in frame.columns:
+        rs20 = frame.reset_index()[["날짜", "RS20"]].dropna()
+        if not rs20.empty:
+            layers.append(
+                alt.Chart(rs20)
+                .mark_line(color=RS_CHART_COLORS["RS20"])
+                .encode(
+                    x=alt.X("날짜:N", sort=date_order, title="날짜"),
+                    y=alt.Y(
+                        "RS20:Q",
+                        title="RS20",
+                        scale=alt.Scale(zero=False, nice=True),
+                        axis=alt.Axis(
+                            orient="right",
+                            titleColor=RS_CHART_COLORS["RS20"],
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("날짜:N", title="날짜"),
+                        alt.Tooltip("RS20:Q", title="RS20", format=",.2f"),
+                    ],
+                )
+            )
+
+    if not layers:
+        st.info("그릴 KOSPI·RS20 데이터가 없습니다.")
+        return
+
+    chart = (
+        alt.layer(*layers)
+        .resolve_scale(y="independent")
+        .properties(height=CHART_HEIGHT)
     )
+    st.altair_chart(chart, width="stretch")
 
 
 
