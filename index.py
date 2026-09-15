@@ -48,23 +48,23 @@ st.markdown(
         color: #e03131 !important;
     }
 
-    /* 타이틀·탭 한 줄: 폴더형 탭 바 배경 */
+    /* 타이틀·탭 한 줄: 배경 투명, 하단 구분선만 */
     div[data-testid="stHorizontalBlock"]:has(div[role="radiogroup"]) {
-        align-items: flex-end !important;
+        align-items: center !important;
         gap: 0.75rem !important;
-        margin-bottom: 0 !important;
-        padding: 0.35rem 0.5rem 0 0.5rem !important;
-        border-bottom: 1px solid #cfd4dc;
-        background: #ffffff;
-        border-radius: 6px 6px 0 0;
+        margin-bottom: 0.35rem !important;
+        padding: 0.25rem 0 0.35rem 0 !important;
+        border-bottom: 1px solid #dee2e6;
+        background: transparent !important;
+        border-radius: 0 !important;
     }
 
-    /* 폴더형 탭 */
+    /* 탭 */
     div[role="radiogroup"] {
         display: flex !important;
         flex-wrap: wrap !important;
-        gap: 2px !important;
-        align-items: flex-end !important;
+        gap: 4px !important;
+        align-items: center !important;
         background: transparent !important;
         border: none !important;
         padding: 0 !important;
@@ -72,29 +72,28 @@ st.markdown(
     }
     div[role="radiogroup"] > label {
         margin: 0 !important;
-        padding: 0.45rem 0.95rem !important;
+        padding: 0.4rem 0.9rem !important;
         border: 1px solid transparent !important;
-        border-bottom: none !important;
-        border-radius: 6px 6px 0 0 !important;
-        background: #ffffff !important;
+        border-radius: 6px !important;
+        background: transparent !important;
         color: #5c6570 !important;
         font-weight: 600 !important;
         line-height: 1.2 !important;
         cursor: pointer !important;
-        position: relative !important;
-        top: 1px !important;
+        position: static !important;
+        top: auto !important;
         box-shadow: none !important;
     }
     div[role="radiogroup"] > label:hover {
-        background: #e3e7ed !important;
+        background: #f1f3f5 !important;
         color: #2f3640 !important;
     }
-    /* 활성 탭: 흰 배경 + 상·좌·우 테두리, 하단은 콘텐츠와 이어짐 */
+    /* 활성 탭: 연한 파란 바탕 */
     div[role="radiogroup"] > label:has(input:checked) {
-        background: #ffffff !important;
-        color: #1f2933 !important;
-        border-color: #cfd4dc !important;
-        border-bottom: 1px solid #ffffff !important;
+        background: #d0ebff !important;
+        color: #1864ab !important;
+        border-color: #a5d8ff !important;
+        border-bottom-color: #a5d8ff !important;
         z-index: 1 !important;
     }
     /* radio 원형 표시 숨김 */
