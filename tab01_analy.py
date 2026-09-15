@@ -357,12 +357,74 @@ def _utf8_open():
         builtins.open = original
 
 
-def _make_chart() -> "object":
-    """StreamlitChart를 UTF-8로 생성한다."""
+def _make_chart():
+    """고정 크기 StreamlitChart를 만든다. autosize는 iframe에서 폭 0이 되어 선이 안 보인다."""
     with _utf8_open():
-        from lightweight_charts.widgets import StreamlitChart
+        from lightweight_charts.widgets import StaticLWC, StreamlitChart
 
-        return StreamlitChart(width=CHART_WIDTH, height=CHART_HEIGHT)
+        chart = object.__new__(StreamlitChart)
+        # StreamlitChart는 autosize=True만 넘기므로 StaticLWC를 직접 초기한다
+        StaticLWC.__init__(
+            chart,
+            width=CHART_WIDTH,
+            height=CHART_HEIGHT,
+            inner_width=1,
+            inner_height=1,
+            scale_candles_only=False,
+            toolbox=False,
+            autosize=False,
+        )
+
+    chart.run_script(
+        f"""
+        (function() {{
+            const box = document.getElementById('container');
+            if (box) {{
+                box.style.width = '{CHART_WIDTH}px';
+                box.style.height = '{CHART_HEIGHT}px';
+                box.style.overflow = 'hidden';
+                box.style.borderRadius = '4px';
+            }}
+            if ({chart.id} && {chart.id}.chart) {{
+                {chart.id}.chart.resize({CHART_WIDTH}, {CHART_HEIGHT});
+            }}
+            document.querySelectorAll('.tv-lightweight-charts').forEach((el) => {{
+                el.style.width = '{CHART_WIDTH}px';
+                el.style.height = '{CHART_HEIGHT}px';
+            }});
+        }})();
+        """
+    )
+    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
+    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
+    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
+    chart.crosshair(mode="normal")
+    chart.time_scale(visible=True, time_visible=False, seconds_visible=False)
+    return chart
+
+
+def _close_ohlc_frame(rows: list[dict]) -> pd.DataFrame:
+    """종가로 OHLC를 채워 chart.set() 기준 시계열을 만든다."""
+    points: list[dict] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        amount = row.get("value")
+        if not day or amount in (None, "", 0, 0.0):
+            continue
+        try:
+            price = float(amount)
+        except (TypeError, ValueError):
+            continue
+        points.append(
+            {
+                "time": day,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+            }
+        )
+    return pd.DataFrame(points)
 
 
 def _apply_mmdd_axis(chart) -> None:
@@ -406,12 +468,14 @@ def _render_color_legend(items: list[tuple[str, str]]) -> None:
 def _render_price_chart(rows: list[dict], title: str) -> None:
     """1번 차트: 종가·이동평균선."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
+    base = _close_ohlc_frame(rows)
+    if base.empty:
+        st.info("그릴 종가·이동평균 데이터가 없습니다.")
+        return
+
     chart = _make_chart()
-    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
-    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
-    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
-    chart.crosshair(mode="normal")
-    chart.hide_data()
+    chart.set(base)  # 타임스케일·축을 잡으려면 기준 OHLC를 먼저 넣어야 한다
+    chart.hide_data()  # 캔들은 숨기고 꺾은선만 보여 준다
     _apply_mmdd_axis(chart)
 
     legend_items: list[tuple[str, str]] = []
@@ -446,11 +510,20 @@ def _render_rs_chart(rows: list[dict], title: str) -> None:
         st.info("그릴 KOSPI·RS20 데이터가 없습니다.")
         return
 
+    # 기준 OHLC는 스케일만 잡는 용도. KOSPI가 있으면 그 값으로, 없으면 RS20으로 채운다
+    scale_src = kospi if not kospi.empty else rs20
+    base = pd.DataFrame(
+        {
+            "time": scale_src["time"],
+            "open": scale_src["value"],
+            "high": scale_src["value"],
+            "low": scale_src["value"],
+            "close": scale_src["value"],
+        }
+    )
+
     chart = _make_chart()
-    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
-    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
-    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
-    chart.crosshair(mode="normal")
+    chart.set(base)
     chart.hide_data()
     _apply_mmdd_axis(chart)
     chart.run_script(
