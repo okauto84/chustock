@@ -1,4 +1,4 @@
-"""분석 탭: STOCK_DATA(ETF)와 STOCKS를 조인해 이동평균·신고가 조건으로 걸러 트리로 보여준다."""
+"""분석 탭: STOCK_DATA(ETF)와 STOCKS를 조인해 이동평균·신고가·시가총액 조건으로 걸러 트리로 보여준다."""
 
 import itertools
 import json
@@ -48,6 +48,15 @@ TOP52_FILTERS: dict[str, float | None] = {
     "50%": 0.50,
 }
 
+# 라벨 -> 시가총액(marketSum, 억원) 하한
+MARKET_SUM_FILTERS: dict[str, float] = {
+    "1000억 이상": 1000,
+    "5000억 이상": 5000,
+    "1조 이상": 10000,
+    "1.5조 이상": 15000,
+    "2조 이상": 20000,
+}
+
 GRID_RATIO = (3, 7)  # 트리(종목) : 구성 종목
 PAGE_ROWS = 30  # 한 분류에 ETF가 수백 개라 나눠 그린다
 
@@ -59,6 +68,7 @@ ROW_PREFIX = "analytree"  # 컨테이너 key → CSS class(st-key-...) 로 연�
 
 MA_KEY = "analy_ma"
 TOP52_KEY = "analy_top52"
+MARKET_SUM_KEY = "analy_market_sum"
 OPEN_KEY = "analy_open_nodes"
 LIMIT_KEY = "analy_page_limits"
 PICK_KEY = "analy_picked_item"
@@ -258,13 +268,19 @@ def passes_filters(
     record: dict | None,
     ma_keys: tuple[str, ...],
     top52_ratio: float | None,
+    market_sum_min: float,
 ) -> bool:
-    """최근 지표 레코드가 두 콤보박스 조건을 모두 만족하는지 본다."""
+    """최근 지표 레코드가 콤보박스 조건을 모두 만족하는지 본다."""
     if record is None:
         return False
 
     value = record.get("value") or 0.0
     if value <= 0:
+        return False
+
+    # marketSum 단위는 억원
+    market_sum = record.get("marketSum") or 0.0
+    if market_sum < market_sum_min:
         return False
 
     if ma_keys:
@@ -292,6 +308,7 @@ def filter_tree(
     values: dict[str, dict],
     ma_keys: tuple[str, ...],
     top52_ratio: float | None,
+    market_sum_min: float,
 ) -> dict[str, dict[str, list[str]]]:
     """조건을 만족하는 ETF만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
     tree: dict[str, dict[str, list[str]]] = {}
@@ -301,7 +318,9 @@ def filter_tree(
             kept = [
                 itemcode
                 for itemcode in itemcodes
-                if passes_filters(values.get(itemcode), ma_keys, top52_ratio)
+                if passes_filters(
+                    values.get(itemcode), ma_keys, top52_ratio, market_sum_min
+                )
             ]
             if kept:
                 kept_lists[sectorlist] = kept
@@ -628,7 +647,9 @@ def show() -> None:
         st.error(f"ETF 데이터 조회 실패 — {load_error}")
         return
 
-    ma_col, top52_col, button_col = st.columns([3, 2, 1], vertical_alignment="bottom")
+    ma_col, top52_col, market_col, button_col = st.columns(
+        [3, 2, 2, 1], vertical_alignment="bottom"
+    )
     with ma_col:
         ma_label = st.selectbox(
             "이동평균선",
@@ -643,6 +664,15 @@ def show() -> None:
             "52주 신고가 비율",
             list(TOP52_FILTERS),
             key=TOP52_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
+        )
+    with market_col:
+        market_label = st.selectbox(
+            "시가총액",
+            list(MARKET_SUM_FILTERS),
+            key=MARKET_SUM_KEY,
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -666,6 +696,7 @@ def show() -> None:
         values,
         MA_FILTERS[ma_label],
         TOP52_FILTERS[top52_label],
+        MARKET_SUM_FILTERS[market_label],
     )
     matched = sum(len(codes) for lists in tree.values() for codes in lists.values())
     total = sum(len(codes) for lists in categories.values() for codes in lists.values())
@@ -674,7 +705,7 @@ def show() -> None:
     st.caption(
         f"기준일 {as_of_text} · STOCK_DATA(ETF) ⨝ STOCKS · "
         f"{secret_name or 'Supabase'} · 이동평균선 {ma_label} · "
-        f"신고가 비율 {top52_label} → {matched}/{total}종목"
+        f"신고가 비율 {top52_label} · 시가총액 {market_label} → {matched}/{total}종목"
     )
 
     with st.container(border=True, gap=0):
