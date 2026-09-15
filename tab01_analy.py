@@ -1,11 +1,9 @@
 """분석 탭: STOCK_DATA와 STOCKS를 조인해 ETF·개별 종목을 카드별 트리로 보여준다."""
 
-import builtins
 import itertools
 import json
 import urllib.parse
 from collections import defaultdict
-from contextlib import contextmanager
 
 import pandas as pd
 import streamlit as st
@@ -89,21 +87,24 @@ STOCKS_TABLE = "STOCKS"
 STOCK_DATA_TABLE = "STOCK_DATA"
 SECTORS_TABLE = "SECTORS"
 
-# 1번 차트: 종가·이동평균선 색/굵기
+# 1번 차트: 종가·이동평균선 (컬럼명, STOCK_DATA 키)
 PRICE_SERIES = (
-    ("종가", "value", "#1c7ed6", 3),
-    ("MA10", "ma10", "#e67700", 1),
-    ("MA20", "ma20", "#2f9e44", 1),
-    ("MA30", "ma30", "#ae3b61", 1),
-    ("MA50", "ma50", "#7048e8", 1),
-    ("MA100", "ma100", "#0c8599", 1),
-    ("MA150", "ma150", "#868e96", 1),
+    ("종가", "value"),
+    ("MA10", "ma10"),
+    ("MA20", "ma20"),
+    ("MA30", "ma30"),
+    ("MA50", "ma50"),
+    ("MA100", "ma100"),
+    ("MA150", "ma150"),
 )
 
-# 2번 차트: 왼쪽 KOSPI / 오른쪽 RS20
-KOSPI_COLOR = "#e03131"
-RS20_COLOR = "#1971c2"
-CHART_HEIGHT = 400  # iframe 세로. 가로는 컨테이너 너비에 맞춰 늘어난다.
+# 2번 차트: KOSPI · RS20
+RS_SERIES = (
+    ("KOSPI", "kospi"),
+    ("RS20", "rs20"),
+)
+
+CHART_HEIGHT = 400
 
 
 def fetch_paginated(
@@ -315,7 +316,7 @@ def load_stock_series(project: str, api_key: str, stock_code: str) -> list[dict]
 
 
 def _to_chart_date(raw: str) -> str | None:
-    """YYYYMMDD / YYYY-MM-DD 를 lightweight-charts용 YYYY-MM-DD로 바꾼다."""
+    """YYYYMMDD / YYYY-MM-DD 를 차트용 YYYY-MM-DD로 바꾼다."""
     text = str(raw or "").strip()
     if len(text) == 8 and text.isdigit():
         return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
@@ -324,265 +325,73 @@ def _to_chart_date(raw: str) -> str | None:
     return None
 
 
-def _series_frame(rows: list[dict], value_key: str) -> pd.DataFrame:
-    """차트 Line.set용 DataFrame(time, value). 0·결측은 뺀다."""
-    points: list[dict] = []
+def _chart_dataframe(
+    rows: list[dict],
+    series: tuple[tuple[str, str], ...],
+) -> pd.DataFrame:
+    """시계열 행을 st.line_chart용 DataFrame으로 만든다. index=MM-DD."""
+    records: list[dict] = []
     for row in rows:
         day = _to_chart_date(row.get("date"))
-        amount = row.get(value_key)
-        if not day or amount in (None, "", 0, 0.0):
+        if not day:
             continue
-        try:
-            points.append({"time": day, "value": float(amount)})
-        except (TypeError, ValueError):
-            continue
-    return pd.DataFrame(points)
+        item: dict = {"_sort": day, "날짜": day[5:10]}
+        has_value = False
+        for label, key in series:
+            raw = row.get(key)
+            if raw in (None, "", 0, 0.0):
+                item[label] = None
+                continue
+            try:
+                item[label] = float(raw)
+            except (TypeError, ValueError):
+                item[label] = None
+            else:
+                has_value = True
+        if has_value:
+            records.append(item)
 
+    if not records:
+        return pd.DataFrame()
 
-@contextmanager
-def _utf8_open():
-    """Windows 기본 인코딩(cp949)에서 lightweight-charts JS 읽기 실패를 막는다."""
-    original = builtins.open
-
-    def opener(file, mode="r", *args, **kwargs):
-        if "b" not in mode and kwargs.get("encoding") is None:
-            kwargs["encoding"] = "utf-8"
-        return original(file, mode, *args, **kwargs)
-
-    builtins.open = opener
-    try:
-        yield
-    finally:
-        builtins.open = original
-
-
-def _make_chart():
-    """lightweight-charts-python StreamlitChart를 만든다. 가로는 부모 너비에 맞춘다."""
-    with _utf8_open():
-        from lightweight_charts.widgets import StreamlitChart
-
-        chart = StreamlitChart(height=CHART_HEIGHT)
-
-    chart.run_script(
-        f"""
-        (function() {{
-            const box = document.getElementById('container');
-            const sync = () => {{
-                if (!box || !{chart.id} || !{chart.id}.chart) return;
-                const w = Math.max(box.clientWidth || window.innerWidth || 640, 320);
-                box.style.width = '100%';
-                box.style.height = '{CHART_HEIGHT}px';
-                box.style.overflow = 'hidden';
-                {chart.id}.chart.resize(w, {CHART_HEIGHT});
-                {chart.id}.chart.timeScale().fitContent();
-            }};
-            if (box) {{
-                box.style.width = '100%';
-                box.style.height = '{CHART_HEIGHT}px';
-            }}
-            sync();
-            window.addEventListener('resize', sync);
-            if (typeof ResizeObserver !== 'undefined' && box) {{
-                new ResizeObserver(sync).observe(box);
-            }}
-        }})();
-        """
-    )
-    chart.layout(background_color="#ffffff", text_color="#212529", font_size=11)
-    chart.grid(vert_enabled=True, horz_enabled=True, color="rgba(0,0,0,0.06)")
-    chart.legend(visible=True, ohlc=False, percent=False, lines=True, font_size=11)
-    chart.crosshair(mode="normal")
-    chart.time_scale(visible=True, time_visible=False, seconds_visible=False)
-    return chart
-
-
-def _load_chart(chart) -> None:
-    """StreamlitChart.load() 대신 srcdoc iframe으로 안전하게 삽입한다.
-
-    components.html에 인라인 JS를 그대로 넣으면 스크립트가 끊겨 차트가 빈 칸으로 남는다.
-    lightweight-charts-python JupyterChart와 같이 HTML을 escape한 srcdoc을 쓴다.
-    가로는 100%(동적), 세로는 CHART_HEIGHT.
-    """
-    import html as html_lib
-
-    import streamlit.components.v1 as components
-
-    if chart.win.loaded:
-        return
-    chart.win.loaded = True
-    for script in chart.win.final_scripts:
-        chart._html += "\n" + script
-
-    full_doc = f"{chart._html}</script></body></html>"
-    escaped = html_lib.escape(full_doc)
-    components.html(
-        f'<iframe title="lightweight-charts" '
-        f'style="width:100%;height:{CHART_HEIGHT}px;border:0;overflow:hidden;" '
-        f'srcdoc="{escaped}"></iframe>',
-        height=CHART_HEIGHT,
-        scrolling=False,
-    )
-
-
-def _close_ohlc_frame(rows: list[dict]) -> pd.DataFrame:
-    """종가로 OHLC를 채워 chart.set() 기준 시계열을 만든다."""
-    points: list[dict] = []
-    for row in rows:
-        day = _to_chart_date(row.get("date"))
-        amount = row.get("value")
-        if not day or amount in (None, "", 0, 0.0):
-            continue
-        try:
-            price = float(amount)
-        except (TypeError, ValueError):
-            continue
-        points.append(
-            {
-                "time": day,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-            }
-        )
-    return pd.DataFrame(points)
-
-
-def _apply_mmdd_axis(chart) -> None:
-    """X축·크로스헤어 날짜를 MM-DD로 표시한다."""
-    chart.run_script(
-        f"""
-        (function() {{
-            const fmt = (t) => {{
-                if (t && typeof t === 'object' && t.year != null) {{
-                    const m = String(t.month).padStart(2, '0');
-                    const d = String(t.day).padStart(2, '0');
-                    return m + '-' + d;
-                }}
-                const s = String(t || '');
-                return s.length >= 10 ? s.slice(5, 10) : s;
-            }};
-            {chart.id}.chart.applyOptions({{
-                localization: {{ timeFormatter: fmt }},
-                timeScale: {{
-                    timeVisible: false,
-                    secondsVisible: false,
-                    tickMarkFormatter: fmt,
-                }},
-            }});
-        }})();
-        """
-    )
-
-
-def _render_color_legend(items: list[tuple[str, str]]) -> None:
-    """차트 아래 고정 범례(색 점 + 이름)."""
-    chips = " · ".join(
-        f"<span style='color:{color}'>■</span> {name}" for name, color in items
-    )
-    st.markdown(
-        f"<div style='margin:0.2rem 0 0.8rem 0;color:#495057'>{chips}</div>",
-        unsafe_allow_html=True,
-    )
+    frame = pd.DataFrame(records).sort_values("_sort")
+    columns = [label for label, _ in series if label in frame.columns]
+    frame = frame.set_index("날짜")[columns]
+    return frame.dropna(axis=1, how="all")
 
 
 def _render_price_chart(rows: list[dict], title: str) -> None:
-    """1번 차트: 종가·이동평균선 (lightweight-charts-python)."""
+    """1번 차트: 종가·이동평균선 (Streamlit 기본 꺾은선)."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
-    base = _close_ohlc_frame(rows)
-    if base.empty:
+    frame = _chart_dataframe(rows, PRICE_SERIES)
+    if frame.empty or frame.dropna(how="all").empty:
         st.info("그릴 종가·이동평균 데이터가 없습니다.")
         return
-
-    chart = _make_chart()
-    chart.set(base)  # 타임스케일·축을 잡으려면 기준 OHLC를 먼저 넣어야 한다
-    chart.hide_data()  # 캔들은 숨기고 꺾은선만 보여 준다
-    _apply_mmdd_axis(chart)
-
-    legend_items: list[tuple[str, str]] = []
-    for name, key, color, width in PRICE_SERIES:
-        frame = _series_frame(rows, key)
-        if frame.empty:
-            continue
-        line = chart.create_line(
-            name,
-            color=color,
-            width=width,
-            price_line=False,
-            price_label=False,
-        )
-        line.set(frame.rename(columns={"value": name}))
-        legend_items.append((name, color))
-
-    if not legend_items:
-        st.info("그릴 종가·이동평균 데이터가 없습니다.")
-        return
-    chart.fit()
-    _load_chart(chart)
-    _render_color_legend(legend_items)
+    st.line_chart(
+        frame,
+        x_label="날짜",
+        y_label="종가",
+        width="stretch",
+        height=CHART_HEIGHT,
+    )
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
-    """2번 차트: 왼쪽 KOSPI · 오른쪽 RS20 (lightweight-charts-python)."""
+    """2번 차트: KOSPI·RS20 (Streamlit 기본 꺾은선)."""
     st.markdown(f"**KOSPI · RS20** — {title}")
-    kospi = _series_frame(rows, "kospi")
-    rs20 = _series_frame(rows, "rs20")
-    if kospi.empty and rs20.empty:
+    frame = _chart_dataframe(rows, RS_SERIES)
+    if frame.empty or frame.dropna(how="all").empty:
         st.info("그릴 KOSPI·RS20 데이터가 없습니다.")
         return
-
-    # 기준 OHLC는 스케일만 잡는 용도. KOSPI가 있으면 그 값으로, 없으면 RS20으로 채운다
-    scale_src = kospi if not kospi.empty else rs20
-    base = pd.DataFrame(
-        {
-            "time": scale_src["time"],
-            "open": scale_src["value"],
-            "high": scale_src["value"],
-            "low": scale_src["value"],
-            "close": scale_src["value"],
-        }
+    st.line_chart(
+        frame,
+        x_label="날짜",
+        y_label="지수",
+        color=["#e03131", "#1971c2"][: len(frame.columns)],
+        width="stretch",
+        height=CHART_HEIGHT,
     )
 
-    chart = _make_chart()
-    chart.set(base)
-    chart.hide_data()
-    _apply_mmdd_axis(chart)
-    chart.run_script(
-        f"""
-        {chart.id}.chart.applyOptions({{
-            leftPriceScale: {{ visible: true, borderVisible: true }},
-            rightPriceScale: {{ visible: true, borderVisible: true }},
-        }});
-        """
-    )
-
-    legend_items: list[tuple[str, str]] = []
-    if not kospi.empty:
-        line = chart.create_line(
-            "KOSPI",
-            color=KOSPI_COLOR,
-            width=2,
-            price_line=False,
-            price_label=False,
-            price_scale_id="left",
-        )
-        line.set(kospi.rename(columns={"value": "KOSPI"}))
-        legend_items.append(("KOSPI", KOSPI_COLOR))
-    if not rs20.empty:
-        line = chart.create_line(
-            "RS20",
-            color=RS20_COLOR,
-            width=2,
-            price_line=False,
-            price_label=False,
-            price_scale_id="right",
-        )
-        line.set(rs20.rename(columns={"value": "RS20"}))
-        legend_items.append(("RS20", RS20_COLOR))
-
-    chart.fit()
-    _load_chart(chart)
-    _render_color_legend(legend_items)
 
 
 def _render_stock_charts(project: str, api_key: str) -> None:
@@ -1172,7 +981,10 @@ def _render_filters(board: dict) -> dict[str, str]:
 
 def _render_board(board: dict, project: str, api_key: str) -> None:
     """카드 한 장: 콤보박스 → 요약 캡션 → 트리 그리드(→ ETF는 포함 ETF 리스트)."""
-    st.markdown(f"**{board['title']}**")
+    st.markdown(
+        f"<span style='font-size:13px;color:#1971c2;font-weight:700'>{board['title']}</span>",
+        unsafe_allow_html=True,
+    )
 
     try:
         as_of, categories, items, values, has_top52 = board["loader"](project, api_key)
