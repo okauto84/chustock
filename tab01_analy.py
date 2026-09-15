@@ -459,6 +459,28 @@ def _draw_chart_range_slider(itemcode: str, days: list[str]) -> None:
     )
 
 
+# 종가 차트와 날짜 범위 슬라이더 사이 여백을 줄인다
+_CHART_RANGE_CSS = """
+<style>
+div[class*="st-key-price-chart-range"] {
+  gap: 0 !important;
+}
+div[class*="st-key-price-chart-range"] [data-testid="stVegaLiteChart"],
+div[class*="st-key-price-chart-range"] [data-testid="stArrowVegaLiteChart"] {
+  margin-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
+div[class*="st-key-price-chart-range"] [data-testid="stSlider"] {
+  margin-top: -0.75rem !important;
+  padding-top: 0 !important;
+}
+div[class*="st-key-price-chart-range"] [data-testid="stSlider"] > label {
+  margin-bottom: 0.15rem !important;
+}
+</style>
+"""
+
+
 def _price_reference_levels(rows: list[dict], frame: pd.DataFrame) -> dict[str, float]:
     """종가 차트용 구간최고·52주신고가·최근종가 기준값을 구한다."""
     levels: dict[str, float] = {}
@@ -741,8 +763,10 @@ def _render_price_chart(rows: list[dict], title: str, itemcode: str) -> None:
             color="independent"
         )
 
-    st.altair_chart(chart, width="stretch")
-    _draw_chart_range_slider(itemcode, all_days)
+    st.markdown(_CHART_RANGE_CSS, unsafe_allow_html=True)
+    with st.container(key="price-chart-range", gap=0):
+        st.altair_chart(chart, width="stretch")
+        _draw_chart_range_slider(itemcode, all_days)
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
