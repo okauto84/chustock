@@ -462,16 +462,24 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         .dropna(subset=["가격"])
     )
     date_order = list(frame.index)
+    volume = _volume_dataframe(rows)
+    # 거래량 차트가 있으면 날짜 라벨은 아래쪽만 쓰고, 종가 차트 X축은 숨긴다
+    price_x_axis = (
+        alt.Axis(title=None, labels=False, ticks=False, domain=False)
+        if not volume.empty
+        else alt.Axis(title="날짜")
+    )
     y_domain = _close_y_domain(frame)
     y_kwargs: dict = {"title": "종가"}
     if y_domain:
         y_kwargs["scale"] = alt.Scale(domain=y_domain, nice=False, zero=False)
     y_enc = alt.Y("가격:Q", **y_kwargs)
+    price_x = alt.X("날짜:N", sort=date_order, axis=price_x_axis)
     lines = (
         alt.Chart(long)
         .mark_line()
         .encode(
-            x=alt.X("날짜:N", sort=date_order, title=None),
+            x=price_x,
             y=y_enc,
             color=alt.Color("구분:N", title=""),
         )
@@ -538,7 +546,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
                     color="#495057",
                 )
                 .encode(
-                    x=alt.X("날짜:N", sort=date_order),
+                    x=price_x,
                     y=y_enc,
                     text="라벨:N",
                 )
@@ -550,7 +558,6 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         .resolve_scale(color="independent")
     )
 
-    volume = _volume_dataframe(rows)
     if volume.empty:
         chart = price_chart
     else:
