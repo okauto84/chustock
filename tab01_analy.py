@@ -839,7 +839,7 @@ def _render_rs_chart(rows: list[dict], title: str) -> None:
 
 
 def _render_stock_charts(project: str, api_key: str) -> None:
-    """개별 종목 트리에서 고른 종목의 1·2번 차트를 트리 아래에 그린다."""
+    """개별 종목 기준 카드 안에서, 트리에서 고른 종목의 1·2번 차트를 그린다."""
     picked = st.session_state.get(CHART_PICK_KEY)
     if not picked:
         return
@@ -866,6 +866,9 @@ def _render_stock_charts(project: str, api_key: str) -> None:
 ETF_BOARD: dict = {
     "kind": "etf",
     "title": "ETF 기준",
+    "title_bg": "#d0ebff",
+    "title_fg": "#1864ab",
+    "title_border": "#74c0fc",
     "prefix": ETF_PREFIX,
     "widget": "analy",
     "loader": load_etf_bundle,
@@ -883,6 +886,9 @@ ETF_BOARD: dict = {
 STOCK_BOARD: dict = {
     "kind": "stock",
     "title": "개별 종목 기준",
+    "title_bg": "#d3f9d8",
+    "title_fg": "#2b8a3e",
+    "title_border": "#8ce99a",
     "prefix": STOCK_PREFIX,
     "widget": "analystk",
     "loader": load_stock_bundle,
@@ -1422,7 +1428,10 @@ def _render_filters(board: dict) -> dict[str, str]:
 def _render_board(board: dict, project: str, api_key: str) -> None:
     """카드 한 장: 콤보박스 → 요약 캡션 → 트리 그리드(→ ETF는 포함 ETF 리스트)."""
     st.markdown(
-        f"<span style='font-size:13px;color:#1971c2;font-weight:700'>{board['title']}</span>",
+        f"<div style='display:inline-block;padding:5px 12px;border-radius:6px;"
+        f"background:{board['title_bg']};color:{board['title_fg']};"
+        f"border:1px solid {board['title_border']};font-size:13px;font-weight:700;"
+        f"letter-spacing:0.02em'>{board['title']}</div>",
         unsafe_allow_html=True,
     )
 
@@ -1463,8 +1472,6 @@ def _render_board(board: dict, project: str, api_key: str) -> None:
 
     if board["kind"] == "etf":
         _render_picked(items, build_holder_index(items))
-    else:
-        _render_stock_charts(project, api_key)
 
 
 def show() -> None:
@@ -1476,6 +1483,9 @@ def show() -> None:
         st.caption("관리 탭에서 기준 데이터·시세 데이터를 먼저 적재해야 합니다.")
         return
 
-    for board in BOARDS:
-        with st.container(border=True):
-            _render_board(board, project, api_key)
+    with st.container(border=True):
+        _render_board(ETF_BOARD, project, api_key)
+
+    with st.container(border=True):
+        _render_board(STOCK_BOARD, project, api_key)
+        _render_stock_charts(project, api_key)
