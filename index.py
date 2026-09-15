@@ -107,9 +107,9 @@ st.markdown(
 )
 
 TAB_MAP = {
-    "분석": tab01_analy.show,
-    "검색": tab02_search.show,
-    "관심": tab03_select.show,
+    "스크리닝": tab01_analy.show,
+    "디테일": tab02_search.show,
+    "가능성": tab03_select.show,
     "관리": tab04_adm.show,
 }
 
