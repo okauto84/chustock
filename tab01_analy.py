@@ -306,8 +306,8 @@ STOCK_BOARD: dict = {
     "widget": "analystk",
     "loader": load_stock_bundle,
     "source": "STOCK_DATA(KS·KQ) ⨝ STOCKS",
-    "ratio": (3, 1, 1, 1, 4),  # 종목 : 시가총액 : 종가 : 52주 신고가 : 거래량·RS
-    "headers": ("종목", "시가총액", "종가", "52주 신고가", "거래량 · RS"),
+    "ratio": (3, 1, 1, 1, 1, 1),  # 종목 : 시가총액 : 종가 : 52주 신고가 : RS20 : RS50
+    "headers": ("종목", "시가총액", "종가", "52주 신고가", "RS20", "RS50"),
     "ma_key": "analystk_ma",
     "proc_key": "analystk_proc",
     "top52_key": "analystk_top52",
@@ -599,13 +599,6 @@ def _fmt_price(value: float | int | None) -> str:
     return f"{float(value):,.0f}"
 
 
-def _fmt_volume(value: float | int | None) -> str:
-    """거래량을 화면용 문자열로 만든다."""
-    if value in (None, "", 0, 0.0):
-        return "-"
-    return f"{float(value):,.0f}주"
-
-
 def _fmt_rs(value: float | int | None) -> str:
     """RS(시장 대비 상대강도, 100=시장과 동일)를 화면용 문자열로 만든다."""
     if value in (None, "", 0, 0.0):
@@ -649,32 +642,33 @@ def _render_more(board: dict, row: dict) -> None:
 
 
 def _render_leaf(board: dict, itemcode: str, item: dict, record: dict | None) -> None:
-    """한 종목: 종목·시가총액·종가·신고가와 카드별 마지막 칸을 한 행에 그린다."""
-    tree_col, market_col, value_col, top52_col, last_col = st.columns(
-        board["ratio"], vertical_alignment="center"
-    )
-    with tree_col:
+    """한 종목: 종목·시가총액·종가·신고가와 카드별 나머지 칸을 한 행에 그린다."""
+    cols = st.columns(board["ratio"], vertical_alignment="center")
+    with cols[0]:
         itemname = item.get("stockName") or item.get("itemname") or itemcode
         st.markdown(
             f":material/description: {itemname}<br>"
             f"<span style='color:#868e96;margin-left:1.4em'>{itemcode}</span>",
             unsafe_allow_html=True,
         )
-    with market_col:
+    with cols[1]:
         st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
-    with value_col:
+    with cols[2]:
         st.markdown(_fmt_price(record.get("value") if record else None))
-    with top52_col:
+    with cols[3]:
         st.markdown(_fmt_price(record.get("top52Value") if record else None))
-    with last_col:
-        if board["kind"] == "etf":
+    if board["kind"] == "etf":
+        with cols[4]:
             _render_holdings(itemcode, item)
-        else:
-            _render_metrics(record)
+    else:
+        with cols[4]:
+            st.markdown(_fmt_rs(record.get("rs20") if record else None))
+        with cols[5]:
+            st.markdown(_fmt_rs(record.get("rs50") if record else None))
 
 
 def _render_holdings(itemcode: str, item: dict) -> None:
-    """ETF 행의 마지막 칸: 구성 종목을 고를 수 있는 박스."""
+    """ETF 행의 마지막 칸: 구성 종목을 고를 수 있는 칩스."""
     holdings = [
         str(name) for name in (item.get("stockItems") or item.get("itemlist") or [])
     ]
@@ -692,17 +686,6 @@ def _render_holdings(itemcode: str, item: dict) -> None:
         on_change=_pick_holding,
         args=(pills_key, itemcode),
         persist_state="session",
-    )
-
-
-def _render_metrics(record: dict | None) -> None:
-    """개별 종목 행의 마지막 칸: 거래량과 RS20·RS50."""
-    st.markdown(
-        f"{_fmt_volume(record.get('proc') if record else None)}<br>"
-        "<span style='color:#868e96'>"
-        f"RS20 {_fmt_rs(record.get('rs20') if record else None)} · "
-        f"RS50 {_fmt_rs(record.get('rs50') if record else None)}</span>",
-        unsafe_allow_html=True,
     )
 
 
