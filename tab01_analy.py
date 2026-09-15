@@ -4,6 +4,7 @@ import itertools
 import json
 import urllib.parse
 from collections import defaultdict
+from datetime import date
 
 import altair as alt
 import pandas as pd
@@ -82,6 +83,7 @@ STOCK_PREFIX = "stocktree"
 
 PICK_KEY = "analy_picked_item"
 CHART_PICK_KEY = "analystk_chart_item"
+CHART_RANGE_KEY = "analystk_chart_date_range"
 PROJECT_KEY = "analy_supabase_project"
 
 STOCKS_TABLE = "STOCKS"
@@ -360,13 +362,13 @@ def _chart_dataframe(
     rows: list[dict],
     series: tuple[tuple[str, str], ...],
 ) -> pd.DataFrame:
-    """시계열 행을 st.line_chart용 DataFrame으로 만든다. index=MM-DD."""
+    """시계열 행을 차트용 DataFrame으로 만든다. index=YYYY-MM-DD."""
     records: list[dict] = []
     for row in rows:
         day = _to_chart_date(row.get("date"))
         if not day:
             continue
-        item: dict = {"_sort": day, "날짜": day[5:10]}
+        item: dict = {"_sort": day, "날짜": day}
         has_value = False
         for label, key in series:
             raw = row.get(key)
@@ -389,6 +391,72 @@ def _chart_dataframe(
     columns = [label for label, _ in series if label in frame.columns]
     frame = frame.set_index("날짜")[columns]
     return frame.dropna(axis=1, how="all")
+
+
+def _series_dates(rows: list[dict]) -> list[str]:
+    """시계열에서 차트용 날짜(YYYY-MM-DD) 목록을 오름차순으로 만든다."""
+    days: list[str] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        if day and (not days or days[-1] != day):
+            days.append(day)
+    return days
+
+
+def _filter_rows_by_date(
+    rows: list[dict], start: str, end: str
+) -> list[dict]:
+    """시작·끝 날짜(YYYY-MM-DD) 구간에 들어가는 시계열만 남긴다."""
+    filtered: list[dict] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        if day and start <= day <= end:
+            filtered.append(row)
+    return filtered
+
+
+def _chart_range_slider(itemcode: str, days: list[str]) -> tuple[str, str]:
+    """X축 날짜 범위 슬라이더 상태. (시작, 끝) YYYY-MM-DD를 돌려준다."""
+    if len(days) == 1:
+        return days[0], days[0]
+
+    min_day = date.fromisoformat(days[0])
+    max_day = date.fromisoformat(days[-1])
+    state_key = f"{CHART_RANGE_KEY}_{itemcode}"
+
+    current = st.session_state.get(state_key)
+    if (
+        not isinstance(current, tuple)
+        or len(current) != 2
+        or not isinstance(current[0], date)
+        or not isinstance(current[1], date)
+    ):
+        st.session_state[state_key] = (min_day, max_day)
+    else:
+        start_day, end_day = current
+        start_day = min(max(start_day, min_day), max_day)
+        end_day = min(max(end_day, min_day), max_day)
+        if start_day > end_day:
+            start_day, end_day = min_day, max_day
+        st.session_state[state_key] = (start_day, end_day)
+
+    start_day, end_day = st.session_state[state_key]
+    return start_day.isoformat(), end_day.isoformat()
+
+
+def _draw_chart_range_slider(itemcode: str, days: list[str]) -> None:
+    """차트 아래에 날짜 범위 슬라이더를 그린다."""
+    if len(days) < 2:
+        return
+    min_day = date.fromisoformat(days[0])
+    max_day = date.fromisoformat(days[-1])
+    st.slider(
+        "X축 날짜 범위",
+        min_value=min_day,
+        max_value=max_day,
+        format="YYYY-MM-DD",
+        key=f"{CHART_RANGE_KEY}_{itemcode}",
+    )
 
 
 def _price_reference_levels(rows: list[dict], frame: pd.DataFrame) -> dict[str, float]:
@@ -452,7 +520,7 @@ def _volume_dataframe(rows: list[dict]) -> pd.DataFrame:
         volume = _as_float(row.get("proc"))
         if not day or volume is None:
             continue
-        records.append({"_sort": day, "날짜": day[5:10], "거래량": volume})
+        records.append({"_sort": day, "날짜": day, "거래량": volume})
 
     if not records:
         return pd.DataFrame()
@@ -486,12 +554,20 @@ def _close_y_domain(frame: pd.DataFrame) -> list[float] | None:
     return [low, high]
 
 
-def _render_price_chart(rows: list[dict], title: str) -> None:
-    """1번 차트: 종가·이동평균선 + 기준선, 바로 아래 거래량 막대."""
+def _render_price_chart(rows: list[dict], title: str, itemcode: str) -> None:
+    """1번 차트: 종가·이동평균선 + 기준선, 바로 아래 거래량 막대·날짜 범위 슬라이더."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
-    frame = _chart_dataframe(rows, PRICE_SERIES)
-    if frame.empty or frame.dropna(how="all").empty:
+    all_days = _series_dates(rows)
+    if not all_days:
         st.info("그릴 종가·이동평균 데이터가 없습니다.")
+        return
+
+    start_day, end_day = _chart_range_slider(itemcode, all_days)
+    view_rows = _filter_rows_by_date(rows, start_day, end_day)
+    frame = _chart_dataframe(view_rows, PRICE_SERIES)
+    if frame.empty or frame.dropna(how="all").empty:
+        st.info("선택한 날짜 범위에 그릴 종가·이동평균 데이터가 없습니다.")
+        _draw_chart_range_slider(itemcode, all_days)
         return
 
     long = (
@@ -500,7 +576,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         .dropna(subset=["가격"])
     )
     date_order = list(frame.index)
-    volume = _volume_dataframe(rows)
+    volume = _volume_dataframe(view_rows)
     # 거래량 차트가 있으면 날짜 라벨은 아래쪽만 쓰고, 종가 차트 X축은 숨긴다
     price_x_axis = (
         alt.Axis(title=None, labels=False, ticks=False, domain=False)
@@ -568,7 +644,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         .transform_filter(hover)
     )
 
-    levels = _price_reference_levels(rows, frame)
+    levels = _price_reference_levels(view_rows, frame)
     layers: list[alt.Chart] = [lines, hover_selectors, hover_rule, hover_points]
     if levels:
         # 가로선은 모두 긋고, 왼쪽 짧은 라벨은 구간최고만 (신고가·갭은 오른쪽 문구로)
@@ -610,7 +686,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
                 )
             )
 
-        gap_info = _top52_gap_label(rows)
+        gap_info = _top52_gap_label(view_rows)
         if gap_info and date_order:
             gap_text, gap_y = gap_info
             # 신고가·현재가 점선 사이(Y), 차트 가로 중앙(X)에 표시
@@ -666,6 +742,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         )
 
     st.altair_chart(chart, width="stretch")
+    _draw_chart_range_slider(itemcode, all_days)
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
@@ -757,7 +834,7 @@ def _render_stock_charts(project: str, api_key: str) -> None:
 
     st.divider()
     st.markdown(f"**차트** — {title} · {len(rows)}거래일")
-    _render_price_chart(rows, title)
+    _render_price_chart(rows, title, itemcode)
     _render_rs_chart(rows, title)
 
 
@@ -768,7 +845,7 @@ ETF_BOARD: dict = {
     "prefix": ETF_PREFIX,
     "widget": "analy",
     "loader": load_etf_bundle,
-    "source": " ",
+    "source": "STOCK_DATA(ETF) ⨝ STOCKS",
     "ratio": (3, 1, 1, 4),  # 종목 : 종가 : 52주 신고가 : 구성 종목
     "headers": ("종목", "종가", "52주 신고가", "구성 종목"),
     "ma_key": "analy_ma",
@@ -785,7 +862,7 @@ STOCK_BOARD: dict = {
     "prefix": STOCK_PREFIX,
     "widget": "analystk",
     "loader": load_stock_bundle,
-    "source": " ",
+    "source": "STOCK_DATA(KS·KQ) ⨝ STOCKS",
     "ratio": (3, 1, 1, 1, 1),  # 종목 : 종가 : 52주 신고가 : RS20 : RS50
     "headers": ("종목", "종가", "52주 신고가", "RS20", "RS50"),
     "ma_key": "analystk_ma",
