@@ -5,6 +5,7 @@ import json
 import urllib.parse
 from collections import defaultdict
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -105,6 +106,13 @@ RS_SERIES = (
 )
 
 CHART_HEIGHT = 400
+
+# 종가·이동평균 차트 기준선 색
+PRICE_REF_COLORS = {
+    "구간최고": "#e67700",
+    "52주신고가": "#c92a2a",
+    "최근종가": "#2f9e44",
+}
 
 
 def fetch_paginated(
@@ -309,10 +317,21 @@ def load_stock_series(project: str, api_key: str, stock_code: str) -> list[dict]
         project,
         api_key,
         STOCK_DATA_TABLE,
-        "date,value,ma10,ma20,ma30,ma50,ma100,ma150,kospi,rs20",
+        "date,value,ma10,ma20,ma30,ma50,ma100,ma150,kospi,rs20,top52Value",
         filters={"stockCode": f"eq.{stock_code}"},
         order="date.asc",
     )
+
+
+def _as_float(raw) -> float | None:
+    """차트·기준선용 숫자를 float로 바꾼다. 없거나 0이면 None."""
+    if raw in (None, "", 0, 0.0):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value != 0.0 else None
 
 
 def _to_chart_date(raw: str) -> str | None:
@@ -360,20 +379,122 @@ def _chart_dataframe(
     return frame.dropna(axis=1, how="all")
 
 
+def _price_reference_levels(rows: list[dict], frame: pd.DataFrame) -> dict[str, float]:
+    """종가 차트용 구간최고·52주신고가·최근종가 기준값을 구한다."""
+    levels: dict[str, float] = {}
+    if "종가" in frame.columns:
+        closes = frame["종가"].dropna()
+        if not closes.empty:
+            levels["구간최고"] = float(closes.max())
+            levels["최근종가"] = float(closes.iloc[-1])
+
+    top52 = None
+    for row in reversed(rows):
+        top52 = _as_float(row.get("top52Value"))
+        if top52 is not None:
+            break
+    if top52 is not None:
+        levels["52주신고가"] = top52
+    return levels
+
+
 def _render_price_chart(rows: list[dict], title: str) -> None:
-    """1번 차트: 종가·이동평균선 (Streamlit 기본 꺾은선)."""
+    """1번 차트: 종가·이동평균선 + 구간최고·52주신고가·최근종가 기준선."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
     frame = _chart_dataframe(rows, PRICE_SERIES)
     if frame.empty or frame.dropna(how="all").empty:
         st.info("그릴 종가·이동평균 데이터가 없습니다.")
         return
-    st.line_chart(
-        frame,
-        x_label="날짜",
-        y_label="종가",
-        width="stretch",
-        height=CHART_HEIGHT,
+
+    long = (
+        frame.reset_index()
+        .melt(id_vars=["날짜"], var_name="구분", value_name="가격")
+        .dropna(subset=["가격"])
     )
+    date_order = list(frame.index)
+    lines = (
+        alt.Chart(long)
+        .mark_line()
+        .encode(
+            x=alt.X("날짜:N", sort=date_order, title="날짜"),
+            y=alt.Y("가격:Q", title="종가"),
+            color=alt.Color("구분:N", title=""),
+        )
+    )
+
+    levels = _price_reference_levels(rows, frame)
+    layers: list[alt.Chart] = [lines]
+    if levels:
+        present = [name for name in PRICE_REF_COLORS if name in levels]
+        ref = pd.DataFrame(
+            [
+                {
+                    "기준": name,
+                    "가격": levels[name],
+                    "라벨": f"{name} {levels[name]:,.0f}",
+                }
+                for name in present
+            ]
+        )
+        color_scale = alt.Scale(
+            domain=present,
+            range=[PRICE_REF_COLORS[name] for name in present],
+        )
+        rules = (
+            alt.Chart(ref)
+            .mark_rule(strokeWidth=1.2, strokeDash=[5, 4])
+            .encode(
+                y="가격:Q",
+                color=alt.Color("기준:N", scale=color_scale, legend=None),
+            )
+        )
+        labels = (
+            alt.Chart(ref)
+            .mark_text(align="left", dx=4, dy=-6, fontSize=11)
+            .encode(
+                x=alt.value(0),
+                y="가격:Q",
+                text="라벨:N",
+                color=alt.Color("기준:N", scale=color_scale, legend=None),
+            )
+        )
+        layers.extend([rules, labels])
+
+        top52 = levels.get("52주신고가")
+        latest = levels.get("최근종가")
+        if top52 and latest and top52 > 0 and date_order:
+            gap_pct = (top52 - latest) / top52 * 100
+            gap = pd.DataFrame(
+                [
+                    {
+                        "날짜": date_order[-1],
+                        "가격": (top52 + latest) / 2,
+                        "라벨": f"갭 {gap_pct:.1f}%",
+                    }
+                ]
+            )
+            layers.append(
+                alt.Chart(gap)
+                .mark_text(
+                    align="right",
+                    dx=-6,
+                    fontSize=13,
+                    fontWeight="bold",
+                    color="#495057",
+                )
+                .encode(
+                    x=alt.X("날짜:N", sort=date_order),
+                    y="가격:Q",
+                    text="라벨:N",
+                )
+            )
+
+    chart = (
+        alt.layer(*layers)
+        .properties(height=CHART_HEIGHT)
+        .resolve_scale(color="independent")
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 def _render_rs_chart(rows: list[dict], title: str) -> None:
