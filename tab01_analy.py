@@ -106,12 +106,20 @@ RS_SERIES = (
 )
 
 CHART_HEIGHT = 400
+VOLUME_CHART_HEIGHT = 140
 
 # 종가·이동평균 차트 기준선 색
 PRICE_REF_COLORS = {
     "구간최고": "#e67700",
     "52주신고가": "#c92a2a",
     "최근종가": "#2f9e44",
+}
+
+# 거래량 막대: 전일 대비 증가=빨강, 감소=파랑
+VOLUME_COLORS = {
+    "증가": "#e03131",
+    "감소": "#1971c2",
+    "보합": "#868e96",
 }
 
 
@@ -317,7 +325,7 @@ def load_stock_series(project: str, api_key: str, stock_code: str) -> list[dict]
         project,
         api_key,
         STOCK_DATA_TABLE,
-        "date,value,ma10,ma20,ma30,ma50,ma100,ma150,kospi,rs20,top52Value",
+        "date,value,proc,ma10,ma20,ma30,ma50,ma100,ma150,kospi,rs20,top52Value",
         filters={"stockCode": f"eq.{stock_code}"},
         order="date.asc",
     )
@@ -398,8 +406,50 @@ def _price_reference_levels(rows: list[dict], frame: pd.DataFrame) -> dict[str, 
     return levels
 
 
+def _volume_dataframe(rows: list[dict]) -> pd.DataFrame:
+    """거래량 막대용 DataFrame. 전일 대비 증감 색 구분 포함."""
+    records: list[dict] = []
+    for row in rows:
+        day = _to_chart_date(row.get("date"))
+        volume = _as_float(row.get("proc"))
+        if not day or volume is None:
+            continue
+        records.append({"_sort": day, "날짜": day[5:10], "거래량": volume})
+
+    if not records:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(records).sort_values("_sort").reset_index(drop=True)
+    previous = frame["거래량"].shift(1)
+    changes: list[str] = []
+    for current, prior in zip(frame["거래량"], previous):
+        if prior is None or pd.isna(prior) or current == prior:
+            changes.append("보합")
+        elif current > prior:
+            changes.append("증가")
+        else:
+            changes.append("감소")
+    frame["증감"] = changes
+    return frame.drop(columns=["_sort"])
+
+
+def _close_y_domain(frame: pd.DataFrame) -> list[float] | None:
+    """종가 최소·최대로 Y축 범위를 잡는다."""
+    if "종가" not in frame.columns:
+        return None
+    closes = frame["종가"].dropna()
+    if closes.empty:
+        return None
+    low = float(closes.min())
+    high = float(closes.max())
+    if low == high:
+        pad = abs(low) * 0.01 or 1.0
+        return [low - pad, high + pad]
+    return [low, high]
+
+
 def _render_price_chart(rows: list[dict], title: str) -> None:
-    """1번 차트: 종가·이동평균선 + 구간최고·52주신고가·최근종가 기준선."""
+    """1번 차트: 종가·이동평균선 + 기준선, 바로 아래 거래량 막대."""
     st.markdown(f"**종가 · 이동평균선** — {title}")
     frame = _chart_dataframe(rows, PRICE_SERIES)
     if frame.empty or frame.dropna(how="all").empty:
@@ -412,12 +462,17 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
         .dropna(subset=["가격"])
     )
     date_order = list(frame.index)
+    y_domain = _close_y_domain(frame)
+    y_kwargs: dict = {"title": "종가"}
+    if y_domain:
+        y_kwargs["scale"] = alt.Scale(domain=y_domain, nice=False, zero=False)
+    y_enc = alt.Y("가격:Q", **y_kwargs)
     lines = (
         alt.Chart(long)
         .mark_line()
         .encode(
-            x=alt.X("날짜:N", sort=date_order, title="날짜"),
-            y=alt.Y("가격:Q", title="종가"),
+            x=alt.X("날짜:N", sort=date_order, title=None),
+            y=y_enc,
             color=alt.Color("구분:N", title=""),
         )
     )
@@ -444,7 +499,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
             alt.Chart(ref)
             .mark_rule(strokeWidth=1.2, strokeDash=[5, 4])
             .encode(
-                y="가격:Q",
+                y=y_enc,
                 color=alt.Color("기준:N", scale=color_scale, legend=None),
             )
         )
@@ -453,7 +508,7 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
             .mark_text(align="left", dx=4, dy=-6, fontSize=11)
             .encode(
                 x=alt.value(0),
-                y="가격:Q",
+                y=y_enc,
                 text="라벨:N",
                 color=alt.Color("기준:N", scale=color_scale, legend=None),
             )
@@ -484,16 +539,43 @@ def _render_price_chart(rows: list[dict], title: str) -> None:
                 )
                 .encode(
                     x=alt.X("날짜:N", sort=date_order),
-                    y="가격:Q",
+                    y=y_enc,
                     text="라벨:N",
                 )
             )
 
-    chart = (
+    price_chart = (
         alt.layer(*layers)
         .properties(height=CHART_HEIGHT)
         .resolve_scale(color="independent")
     )
+
+    volume = _volume_dataframe(rows)
+    if volume.empty:
+        chart = price_chart
+    else:
+        volume_chart = (
+            alt.Chart(volume)
+            .mark_bar()
+            .encode(
+                x=alt.X("날짜:N", sort=date_order, title="날짜"),
+                y=alt.Y("거래량:Q", title="거래량"),
+                color=alt.Color(
+                    "증감:N",
+                    scale=alt.Scale(
+                        domain=list(VOLUME_COLORS),
+                        range=list(VOLUME_COLORS.values()),
+                    ),
+                    legend=None,
+                ),
+                tooltip=["날짜", "거래량", "증감"],
+            )
+            .properties(height=VOLUME_CHART_HEIGHT)
+        )
+        chart = alt.vconcat(price_chart, volume_chart, spacing=8).resolve_scale(
+            color="independent"
+        )
+
     st.altair_chart(chart, width="stretch")
 
 
