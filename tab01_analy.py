@@ -1,4 +1,4 @@
-"""분석 탭: STOCK_DATA(ETF)와 STOCKS를 조인해 이동평균·거래량·신고가·시가총액 조건으로 걸러 트리로 보여준다."""
+"""분석 탭: STOCK_DATA와 STOCKS를 조인해 ETF·개별 종목을 카드별 트리로 보여준다."""
 
 import itertools
 import json
@@ -67,22 +67,17 @@ MARKET_SUM_FILTERS: dict[str, float | None] = {
     "2조 이상": 20000,
 }
 
-GRID_RATIO = (3, 1, 1, 1, 4)  # 종목 : 시가총액 : 종가 : 52주 신고가 : 구성 종목
-GRID_HEADERS = ("종목", "시가총액", "종가", "52주 신고가", "구성 종목")
-PAGE_ROWS = 30  # 한 분류에 ETF가 수백 개라 나눠 그린다
+PAGE_ROWS = 30  # 한 분류에 종목이 수백 개라 나눠 그린다
 
 INDENT_PX = 18  # 한 계층을 들여쓰는 폭
 GUIDE_PX = 9  # 부모 아이콘 중앙을 지나는 세로 연결선의 x 좌표
 GUIDE_COLOR = "#b8bfc6"
 MAX_DEPTH = 2  # 섹터(0) → 세부 분류(1) → 종목(2)
-ROW_PREFIX = "analytree"  # 컨테이너 key → CSS class(st-key-...) 로 연결선을 그린다
 
-MA_KEY = "analy_ma"
-PROC_KEY = "analy_proc"
-TOP52_KEY = "analy_top52"
-MARKET_SUM_KEY = "analy_market_sum"
-OPEN_KEY = "analy_open_nodes"
-LIMIT_KEY = "analy_page_limits"
+# 컨테이너 key → CSS class(st-key-...) 로 연결선을 그린다. 카드마다 달라야 key가 겹치지 않는다
+ETF_PREFIX = "analytree"
+STOCK_PREFIX = "stocktree"
+
 PICK_KEY = "analy_picked_item"
 PROJECT_KEY = "analy_supabase_project"
 
@@ -150,13 +145,19 @@ def resolve_supabase() -> tuple[str | None, str | None, str | None]:
     return project, api_key, None
 
 
-@st.cache_data(show_spinner="ETF 시세를 불러오는 중입니다…", ttl=300)
-def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict, dict, bool]:
-    """STOCK_DATA(ETF)와 STOCKS를 stockCode로 조인해 분석용 묶음을 만든다.
+def load_bundle(
+    project: str,
+    api_key: str,
+    item_filter: str,
+    default_item: str,
+) -> tuple[str | None, dict, dict, dict, bool]:
+    """STOCK_DATA와 STOCKS를 stockCode로 조인해 분석용 묶음을 만든다.
 
-    반환: (기준일, categories, etfs, values, has_top52)
+    item_filter는 stockItem에 걸 PostgREST 조건(예: eq.ETF, neq.ETF)이다.
+
+    반환: (기준일, categories, items, values, has_top52)
     - categories: sectorName -> sectorItem -> stockCode[]
-    - etfs: stockCode -> 종목 정보(STOCKS + 섹터명)
+    - items: stockCode -> 종목 정보(STOCKS + 섹터명)
     - values: stockCode -> 해당 기준일 STOCK_DATA 행
     """
     stocks = fetch_paginated(
@@ -164,7 +165,7 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         api_key,
         STOCKS_TABLE,
         "stockCode,stockName,stockItem,stockItems,sectorCode,sectorItem",
-        filters={"stockItem": "eq.ETF"},
+        filters={"stockItem": item_filter},
         order="stockCode",
     )
     stock_by_code = {
@@ -193,7 +194,7 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         + urllib.parse.urlencode(
             {
                 "select": "date",
-                "stockItem": "eq.ETF",
+                "stockItem": item_filter,
                 "order": "date.desc",
                 "limit": "1",
             }
@@ -215,12 +216,12 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         "stockCode,stockItem,date,sectorCode,sectorItem,value,proc,kospi,"
         "rs20,rs50,ma10,ma20,ma30,ma50,ma100,ma150,"
         "proc10,proc20,proc30,proc50,top52Value,marketSum",
-        filters={"stockItem": "eq.ETF", "date": f"eq.{as_of}"},
+        filters={"stockItem": item_filter, "date": f"eq.{as_of}"},
         order="stockCode",
     )
 
     values: dict[str, dict] = {}
-    etfs: dict[str, dict] = {}
+    items: dict[str, dict] = {}
     categories: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     has_top52 = False
 
@@ -242,10 +243,10 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         if not isinstance(holdings, list):
             holdings = []
 
-        etfs[stock_code] = {
+        items[stock_code] = {
             "stockCode": stock_code,
             "stockName": stock.get("stockName") or stock_code,
-            "stockItem": stock.get("stockItem") or "ETF",
+            "stockItem": stock.get("stockItem") or default_item,
             "stockItems": [str(name) for name in holdings],
             "sectorCode": sector_code,
             "sectorItem": sector_item,
@@ -261,11 +262,61 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
 
     return (
         as_of,
-        {sector: dict(items) for sector, items in categories.items()},
-        etfs,
+        {sector: dict(sectorlists) for sector, sectorlists in categories.items()},
+        items,
         values,
         has_top52,
     )
+
+
+@st.cache_data(show_spinner="ETF 시세를 불러오는 중입니다…", ttl=300)
+def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict, dict, bool]:
+    """STOCK_DATA(ETF) ⨝ STOCKS 묶음."""
+    return load_bundle(project, api_key, "eq.ETF", "ETF")
+
+
+@st.cache_data(show_spinner="개별 종목 시세를 불러오는 중입니다…", ttl=300)
+def load_stock_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict, dict, bool]:
+    """STOCK_DATA(ETF 제외: KS·KQ) ⨝ STOCKS 묶음."""
+    return load_bundle(project, api_key, "neq.ETF", "KS")
+
+
+# 카드(보드)마다 다른 CSS 접두어·세션 키·그리드 구성을 한곳에 모아 둔다
+ETF_BOARD: dict = {
+    "kind": "etf",
+    "title": "ETF 기준",
+    "prefix": ETF_PREFIX,
+    "widget": "analy",
+    "loader": load_etf_bundle,
+    "source": "STOCK_DATA(ETF) ⨝ STOCKS",
+    "ratio": (3, 1, 1, 1, 4),  # 종목 : 시가총액 : 종가 : 52주 신고가 : 구성 종목
+    "headers": ("종목", "시가총액", "종가", "52주 신고가", "구성 종목"),
+    "ma_key": "analy_ma",
+    "proc_key": "analy_proc",
+    "top52_key": "analy_top52",
+    "market_key": "analy_market_sum",
+    "open_key": "analy_open_nodes",
+    "limit_key": "analy_page_limits",
+}
+
+STOCK_BOARD: dict = {
+    "kind": "stock",
+    "title": "개별 종목 기준",
+    "prefix": STOCK_PREFIX,
+    "widget": "analystk",
+    "loader": load_stock_bundle,
+    "source": "STOCK_DATA(KS·KQ) ⨝ STOCKS",
+    "ratio": (3, 1, 1, 1, 4),  # 종목 : 시가총액 : 종가 : 52주 신고가 : 거래량·RS
+    "headers": ("종목", "시가총액", "종가", "52주 신고가", "거래량 · RS"),
+    "ma_key": "analystk_ma",
+    "proc_key": "analystk_proc",
+    "top52_key": "analystk_top52",
+    "market_key": "analystk_market_sum",
+    "open_key": "analystk_open_nodes",
+    "limit_key": "analystk_page_limits",
+}
+
+BOARDS = (ETF_BOARD, STOCK_BOARD)
 
 
 def build_holder_index(etfs: dict[str, dict]) -> dict[str, list[str]]:
@@ -338,7 +389,7 @@ def filter_tree(
     top52_ratio: float | None,
     market_sum_min: float | None,
 ) -> dict[str, dict[str, list[str]]]:
-    """조건을 만족하는 ETF만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
+    """조건을 만족하는 종목만 남긴 분류 트리. 종목이 없는 분류는 뺀다."""
     tree: dict[str, dict[str, list[str]]] = {}
     for sector, sectorlists in categories.items():
         kept_lists: dict[str, list[str]] = {}
@@ -361,22 +412,23 @@ def filter_tree(
     return tree
 
 
-def _toggle_node(node: str) -> None:
-    opened: set[str] = st.session_state.setdefault(OPEN_KEY, set())
+def _toggle_node(open_key: str, node: str) -> None:
+    opened: set[str] = st.session_state.setdefault(open_key, set())
     opened.symmetric_difference_update({node})
 
 
-def _grow_page(node: str) -> None:
-    limits: dict[str, int] = st.session_state.setdefault(LIMIT_KEY, {})
+def _grow_page(limit_key: str, node: str) -> None:
+    limits: dict[str, int] = st.session_state.setdefault(limit_key, {})
     limits[node] = limits.get(node, PAGE_ROWS) + PAGE_ROWS
 
 
-def _reset_tree() -> None:
+def _reset_board(board: dict) -> None:
     """검색 버튼을 누르면 최신 지표를 다시 읽고 펼친 상태·선택을 처음으로 돌린다."""
-    load_etf_bundle.clear()
-    st.session_state[OPEN_KEY] = set()
-    st.session_state[LIMIT_KEY] = {}
-    st.session_state[PICK_KEY] = None
+    board["loader"].clear()
+    st.session_state[board["open_key"]] = set()
+    st.session_state[board["limit_key"]] = {}
+    if board["kind"] == "etf":
+        st.session_state[PICK_KEY] = None
 
 
 def _pick_holding(pills_key: str, itemcode: str) -> None:
@@ -390,31 +442,31 @@ def _pick_holding(pills_key: str, itemcode: str) -> None:
             st.session_state[key] = None
 
 
-def _row_prefix(flags: tuple[bool, ...]) -> str:
+def _row_prefix(prefix: str, flags: tuple[bool, ...]) -> str:
     """계층마다 '마지막 형제인가'를 CSS class에 쓸 문자열로 만든다."""
     if not flags:
-        return f"{ROW_PREFIX}-root"
-    return f"{ROW_PREFIX}-" + "".join("1" if flag else "0" for flag in flags)
+        return f"{prefix}-root"
+    return f"{prefix}-" + "".join("1" if flag else "0" for flag in flags)
 
 
-def _guide_css() -> str:
+def _guide_css(prefix: str) -> str:
     """깊이·형제 위치 조합마다 세로선과 꺾임선을 배경으로 그리는 CSS."""
     rules = [
         # 트리 헤더(종목 / 구성 종목): 글자 높이에 맞게 세로 여백 축소
-        f'div[class*="st-key-{ROW_PREFIX}-header"] {{'
+        f'div[class*="st-key-{prefix}-header"] {{'
         " padding: 0.15rem 0 0.2rem 0 !important; margin: 0 0 0.25rem 0 !important;"
         " gap: 0 !important; border-bottom: 1px solid rgba(49, 51, 63, 0.2); }",
-        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        f'div[class*="st-key-{prefix}-header"]'
         " [data-testid='stHorizontalBlock'] {"
         " gap: 0.5rem !important; align-items: center !important;"
         " min-height: 0 !important; }",
-        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        f'div[class*="st-key-{prefix}-header"]'
         " [data-testid='stColumn'] {"
         " padding-top: 0 !important; padding-bottom: 0 !important;"
         " min-height: 0 !important; }",
-        f'div[class*="st-key-{ROW_PREFIX}-header"]'
+        f'div[class*="st-key-{prefix}-header"]'
         " [data-testid='stMarkdownContainer'],"
-        f' div[class*="st-key-{ROW_PREFIX}-header"]'
+        f' div[class*="st-key-{prefix}-header"]'
         " [data-testid='stMarkdownContainer'] p {"
         " margin: 0 !important; padding: 0 !important;"
         " line-height: 1.2 !important; }",
@@ -422,22 +474,22 @@ def _guide_css() -> str:
         '[data-testid="stMarkdownContainer"]:has(> style):not(:has(> :not(style))) {'
         " display: none !important; height: 0 !important;"
         " margin: 0 !important; padding: 0 !important; }",
-        f'div[class*="st-key-{ROW_PREFIX}-"] button {{'
+        f'div[class*="st-key-{prefix}-"] button {{'
         " padding-top: 0; padding-bottom: 0; min-height: 1.5rem;"
         " width: auto !important; max-width: 100%; }",
-        f'div[class*="st-key-{ROW_PREFIX}-"] button,'
-        f' div[class*="st-key-{ROW_PREFIX}-"] button *'
+        f'div[class*="st-key-{prefix}-"] button,'
+        f' div[class*="st-key-{prefix}-"] button *'
         " { justify-content: flex-start !important; text-align: left !important; }",
-        f'div[class*="st-key-{ROW_PREFIX}-"]'
+        f'div[class*="st-key-{prefix}-"]'
         " [data-testid='stMarkdownContainer'],"
-        f' div[class*="st-key-{ROW_PREFIX}-"]'
+        f' div[class*="st-key-{prefix}-"]'
         " [data-testid='stMarkdownContainer'] p,"
-        f' div[class*="st-key-{ROW_PREFIX}-"]'
+        f' div[class*="st-key-{prefix}-"]'
         " [data-testid='stMarkdownContainer'] div"
         " { text-align: left !important; justify-content: flex-start !important;"
         " margin: 0; }",
-        f'div[class*="st-key-{ROW_PREFIX}-"] p {{ margin-bottom: 0; }}',
-        f'div[class*="st-key-{ROW_PREFIX}-"] [data-testid="stIconMaterial"]'
+        f'div[class*="st-key-{prefix}-"] p {{ margin-bottom: 0; }}',
+        f'div[class*="st-key-{prefix}-"] [data-testid="stIconMaterial"]'
         " { font-size: 15px !important; }",
     ]
     for depth in range(1, MAX_DEPTH + 1):
@@ -450,7 +502,7 @@ def _guide_css() -> str:
             layers.append((f"{own_x}px 0", "1px 50%" if flags[-1] else "1px 100%"))
             layers.append((f"{own_x}px 50%", f"{INDENT_PX - GUIDE_PX}px 1px"))
 
-            selector = f'div[class*="st-key-{_row_prefix(flags)}-"]'
+            selector = f'div[class*="st-key-{_row_prefix(prefix, flags)}-"]'
             gradients = ", ".join(
                 f"linear-gradient({GUIDE_COLOR}, {GUIDE_COLOR})" for _ in layers
             )
@@ -468,7 +520,7 @@ def _guide_css() -> str:
     return "<style>\n" + "\n".join(rules) + "\n</style>"
 
 
-TREE_CSS = _guide_css()
+TREE_CSS = {board["prefix"]: _guide_css(board["prefix"]) for board in BOARDS}
 
 
 def _tree_rows(
@@ -547,9 +599,23 @@ def _fmt_price(value: float | int | None) -> str:
     return f"{float(value):,.0f}"
 
 
-def _render_branch(row: dict, opened: set[str]) -> None:
+def _fmt_volume(value: float | int | None) -> str:
+    """거래량을 화면용 문자열로 만든다."""
+    if value in (None, "", 0, 0.0):
+        return "-"
+    return f"{float(value):,.0f}주"
+
+
+def _fmt_rs(value: float | int | None) -> str:
+    """RS(시장 대비 상대강도, 100=시장과 동일)를 화면용 문자열로 만든다."""
+    if value in (None, "", 0, 0.0):
+        return "-"
+    return f"{float(value):,.1f}"
+
+
+def _render_branch(board: dict, row: dict, opened: set[str]) -> None:
     """섹터·세부 분류 행: 접고 펴는 네모 아이콘과 이름을 그린다."""
-    tree_col, *_ = st.columns(GRID_RATIO, vertical_alignment="center")
+    tree_col, *_ = st.columns(board["ratio"], vertical_alignment="center")
     with tree_col:
         is_open = row["node"] in opened
         st.button(
@@ -559,33 +625,33 @@ def _render_branch(row: dict, opened: set[str]) -> None:
                 if is_open
                 else ":material/add_box:"
             ),
-            key=f"analy_node_{row['node']}",
+            key=f"{board['widget']}_node_{row['node']}",
             on_click=_toggle_node,
-            args=(row["node"],),
+            args=(board["open_key"], row["node"]),
             type="tertiary",
             width="content",
         )
 
 
-def _render_more(row: dict) -> None:
+def _render_more(board: dict, row: dict) -> None:
     """한 분류에서 아직 못 그린 종목을 더 불러오는 행."""
-    tree_col, *_ = st.columns(GRID_RATIO, vertical_alignment="center")
+    tree_col, *_ = st.columns(board["ratio"], vertical_alignment="center")
     with tree_col:
         st.button(
             f"남은 {row['remaining']}종목 중 {min(row['remaining'], PAGE_ROWS)}개 더 보기",
             icon=":material/more_horiz:",
-            key=f"analy_more_{row['node']}",
+            key=f"{board['widget']}_more_{row['node']}",
             on_click=_grow_page,
-            args=(row["node"],),
+            args=(board["limit_key"], row["node"]),
             type="tertiary",
             width="content",
         )
 
 
-def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
-    """ETF 한 종목: 종목·시가총액·종가·신고가·구성 종목을 한 행에 그린다."""
-    tree_col, market_col, value_col, top52_col, holdings_col = st.columns(
-        GRID_RATIO, vertical_alignment="center"
+def _render_leaf(board: dict, itemcode: str, item: dict, record: dict | None) -> None:
+    """한 종목: 종목·시가총액·종가·신고가와 카드별 마지막 칸을 한 행에 그린다."""
+    tree_col, market_col, value_col, top52_col, last_col = st.columns(
+        board["ratio"], vertical_alignment="center"
     )
     with tree_col:
         itemname = item.get("stockName") or item.get("itemname") or itemcode
@@ -600,37 +666,58 @@ def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
         st.markdown(_fmt_price(record.get("value") if record else None))
     with top52_col:
         st.markdown(_fmt_price(record.get("top52Value") if record else None))
-    with holdings_col:
-        holdings = [
-            str(name) for name in (item.get("stockItems") or item.get("itemlist") or [])
-        ]
-        if not holdings:
-            st.caption("구성 종목 정보가 없습니다.")
-            return
-        pills_key = f"analy_pills_{itemcode}"
-        st.pills(
-            "구성 종목",
-            holdings,
-            selection_mode="single",
-            label_visibility="collapsed",
-            wrap=True,
-            key=pills_key,
-            on_change=_pick_holding,
-            args=(pills_key, itemcode),
-            persist_state="session",
-        )
+    with last_col:
+        if board["kind"] == "etf":
+            _render_holdings(itemcode, item)
+        else:
+            _render_metrics(record)
+
+
+def _render_holdings(itemcode: str, item: dict) -> None:
+    """ETF 행의 마지막 칸: 구성 종목을 고를 수 있는 박스."""
+    holdings = [
+        str(name) for name in (item.get("stockItems") or item.get("itemlist") or [])
+    ]
+    if not holdings:
+        st.caption("구성 종목 정보가 없습니다.")
+        return
+    pills_key = f"analy_pills_{itemcode}"
+    st.pills(
+        "구성 종목",
+        holdings,
+        selection_mode="single",
+        label_visibility="collapsed",
+        wrap=True,
+        key=pills_key,
+        on_change=_pick_holding,
+        args=(pills_key, itemcode),
+        persist_state="session",
+    )
+
+
+def _render_metrics(record: dict | None) -> None:
+    """개별 종목 행의 마지막 칸: 거래량과 RS20·RS50."""
+    st.markdown(
+        f"{_fmt_volume(record.get('proc') if record else None)}<br>"
+        "<span style='color:#868e96'>"
+        f"RS20 {_fmt_rs(record.get('rs20') if record else None)} · "
+        f"RS50 {_fmt_rs(record.get('rs50') if record else None)}</span>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_tree(
+    board: dict,
     tree: dict[str, dict[str, list[str]]],
-    etfs: dict[str, dict],
+    items: dict[str, dict],
     values: dict[str, dict],
     matched: int,
 ) -> None:
-    st.markdown(TREE_CSS, unsafe_allow_html=True)
-    with st.container(key=f"{ROW_PREFIX}-header", gap=0):
-        header_cols = st.columns(GRID_RATIO, gap="small")
-        for col, title in zip(header_cols, GRID_HEADERS):
+    prefix = board["prefix"]
+    st.markdown(TREE_CSS[prefix], unsafe_allow_html=True)
+    with st.container(key=f"{prefix}-header", gap=0):
+        header_cols = st.columns(board["ratio"], gap="small")
+        for col, title in zip(header_cols, board["headers"]):
             if title == "종목":
                 col.markdown(f"**{title} ({matched})**")
             else:
@@ -640,22 +727,23 @@ def _render_tree(
         st.info("조건을 만족하는 종목이 없습니다.")
         return
 
-    opened: set[str] = st.session_state.setdefault(OPEN_KEY, set())
-    limits: dict[str, int] = st.session_state.setdefault(LIMIT_KEY, {})
+    opened: set[str] = st.session_state.setdefault(board["open_key"], set())
+    limits: dict[str, int] = st.session_state.setdefault(board["limit_key"], {})
     with st.container(gap=0):
         for index, row in enumerate(_tree_rows(tree, opened, limits)):
-            with st.container(key=f"{_row_prefix(row['flags'])}-{index}", gap=0):
+            with st.container(key=f"{_row_prefix(prefix, row['flags'])}-{index}", gap=0):
                 if row["kind"] == "branch":
-                    _render_branch(row, opened)
+                    _render_branch(board, row, opened)
                 elif row["kind"] == "leaf":
                     itemcode = row["itemcode"]
                     _render_leaf(
+                        board,
                         itemcode,
-                        etfs.get(itemcode, {"stockCode": itemcode, "itemcode": itemcode}),
+                        items.get(itemcode, {"stockCode": itemcode, "itemcode": itemcode}),
                         values.get(itemcode),
                     )
                 else:
-                    _render_more(row)
+                    _render_more(board, row)
 
 
 def _render_picked(etfs: dict[str, dict], holder_index: dict[str, list[str]]) -> None:
@@ -690,21 +778,8 @@ def _render_picked(etfs: dict[str, dict], holder_index: dict[str, list[str]]) ->
     )
 
 
-def show() -> None:
-    st.subheader("분석")
-
-    project, api_key, error = resolve_supabase()
-    if error or not project or not api_key:
-        st.error(error or "Supabase 연결 정보를 확인하세요.")
-        st.caption("관리 탭에서 기준 데이터·시세 데이터를 먼저 적재해야 합니다.")
-        return
-
-    try:
-        as_of, categories, etfs, values, has_top52 = load_etf_bundle(project, api_key)
-    except Exception as load_error:  # 연결·권한 오류를 화면에 그대로 보여준다
-        st.error(f"ETF 데이터 조회 실패 — {load_error}")
-        return
-
+def _render_filters(board: dict) -> dict[str, str]:
+    """이동평균선·거래량·시가총액·신고가 콤보박스와 검색 버튼. 고른 라벨을 돌려준다."""
     ma_col, proc_col, market_col, top52_col, button_col = st.columns(
         [3, 3, 2, 2, 1], vertical_alignment="bottom"
     )
@@ -712,7 +787,7 @@ def show() -> None:
         ma_label = st.selectbox(
             "이동평균선",
             list(MA_FILTERS),
-            key=MA_KEY,
+            key=board["ma_key"],
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -721,7 +796,7 @@ def show() -> None:
         proc_label = st.selectbox(
             "거래량 이동평균",
             list(PROC_FILTERS),
-            key=PROC_KEY,
+            key=board["proc_key"],
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -730,7 +805,7 @@ def show() -> None:
         market_label = st.selectbox(
             "시가총액",
             list(MARKET_SUM_FILTERS),
-            key=MARKET_SUM_KEY,
+            key=board["market_key"],
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -739,7 +814,7 @@ def show() -> None:
         top52_label = st.selectbox(
             "52주 신고가 비율",
             list(TOP52_FILTERS),
-            key=TOP52_KEY,
+            key=board["top52_key"],
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -749,11 +824,31 @@ def show() -> None:
             "검색",
             type="primary",
             width="stretch",
-            on_click=_reset_tree,
-            key="analy_search",
+            on_click=_reset_board,
+            args=(board,),
+            key=f"{board['widget']}_search",
         )
+    return {
+        "ma": ma_label,
+        "proc": proc_label,
+        "market": market_label,
+        "top52": top52_label,
+    }
 
-    if not has_top52 and TOP52_FILTERS[top52_label] is not None:
+
+def _render_board(board: dict, project: str, api_key: str) -> None:
+    """카드 한 장: 콤보박스 → 요약 캡션 → 트리 그리드(→ ETF는 포함 ETF 리스트)."""
+    st.markdown(f"**{board['title']}**")
+
+    try:
+        as_of, categories, items, values, has_top52 = board["loader"](project, api_key)
+    except Exception as load_error:  # 연결·권한 오류를 화면에 그대로 보여준다
+        st.error(f"{board['title']} 데이터 조회 실패 — {load_error}")
+        return
+
+    labels = _render_filters(board)
+
+    if not has_top52 and TOP52_FILTERS[labels["top52"]] is not None:
         st.warning(
             "STOCK_DATA에 top52Value 값이 없어 신고가 비율 필터는 '전체'만 유효합니다."
         )
@@ -761,23 +856,38 @@ def show() -> None:
     tree = filter_tree(
         categories,
         values,
-        MA_FILTERS[ma_label],
-        PROC_FILTERS[proc_label],
-        TOP52_FILTERS[top52_label],
-        MARKET_SUM_FILTERS[market_label],
+        MA_FILTERS[labels["ma"]],
+        PROC_FILTERS[labels["proc"]],
+        TOP52_FILTERS[labels["top52"]],
+        MARKET_SUM_FILTERS[labels["market"]],
     )
     matched = sum(len(codes) for lists in tree.values() for codes in lists.values())
     total = sum(len(codes) for lists in categories.values() for codes in lists.values())
     as_of_text = as_of or "없음"
     secret_name = st.session_state.get("analy_supabase_secret", "")
     st.caption(
-        f"기준일 {as_of_text} · STOCK_DATA(ETF) ⨝ STOCKS · "
-        f"{secret_name or 'Supabase'} · 이동평균선 {ma_label} · "
-        f"거래량 이동평균 {proc_label} · 신고가 비율 {top52_label} · "
-        f"시가총액 {market_label} → {matched}/{total}종목"
+        f"기준일 {as_of_text} · {board['source']} · "
+        f"{secret_name or 'Supabase'} · 이동평균선 {labels['ma']} · "
+        f"거래량 이동평균 {labels['proc']} · 신고가 비율 {labels['top52']} · "
+        f"시가총액 {labels['market']} → {matched}/{total}종목"
     )
 
     with st.container(border=True, gap=0):
-        _render_tree(tree, etfs, values, matched)
+        _render_tree(board, tree, items, values, matched)
 
-    _render_picked(etfs, build_holder_index(etfs))
+    if board["kind"] == "etf":
+        _render_picked(items, build_holder_index(items))
+
+
+def show() -> None:
+    st.subheader("분석")
+
+    project, api_key, error = resolve_supabase()
+    if error or not project or not api_key:
+        st.error(error or "Supabase 연결 정보를 확인하세요.")
+        st.caption("관리 탭에서 기준 데이터·시세 데이터를 먼저 적재해야 합니다.")
+        return
+
+    for board in BOARDS:
+        with st.container(border=True):
+            _render_board(board, project, api_key)
