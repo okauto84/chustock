@@ -618,15 +618,21 @@ def _render_base_results(results: list[dict]) -> None:
 
 
 def _render_stock_data_result(result: dict) -> None:
-    """시세 적재 결과를 요약 지표와 표로 출력한다."""
+    """시세 적재 결과를 기준 데이터 INSERT와 같이 완료 배너·요약·표로 출력한다."""
     if not result.get("ok"):
         st.error(f"시세 데이터 INSERT 실패 — {result.get('error', '알 수 없는 오류')}")
         return
 
     summary = result["summary"]
+    base_dates = summary.get("base_dates") or []
+    if base_dates:
+        date_text = f"{base_dates[0]} ~ {base_dates[-1]}"
+    else:
+        date_text = "없음"
+
     st.success(
-        f"시세 데이터 INSERT 완료 — 기준일 {len(summary['base_dates'])}일 "
-        f"({summary['base_dates'][0]} ~ {summary['base_dates'][-1]})"
+        f"시세 데이터 INSERT 완료 — 레코드 {summary['records']:,}건 "
+        f"(성공 {summary['ok_items']} / 실패 {summary['failed']}, {summary['elapsed']}초)"
     )
     columns = st.columns(5)
     columns[0].metric("종목", f"{summary['items']}건")
@@ -634,9 +640,12 @@ def _render_stock_data_result(result: dict) -> None:
     columns[2].metric("실패", f"{summary['failed']}건")
     columns[3].metric("레코드", f"{summary['records']:,}건")
     columns[4].metric("소요 시간", f"{summary['elapsed']}초")
+    st.caption(
+        f"적재 테이블: {STOCK_DATA_TABLE} · 컬럼 {len(STOCK_DATA_COLUMNS)}개 · "
+        f"기준일 {len(base_dates)}일 ({date_text})"
+    )
     if summary["failed"]:
         st.warning(f"{summary['failed']}개 종목은 시세 조회에 실패해 제외했습니다.")
-    st.caption(f"적재 테이블: {STOCK_DATA_TABLE} · 컬럼 {len(STOCK_DATA_COLUMNS)}개")
     st.dataframe(summary["files"], width="stretch", hide_index=True)
 
 
@@ -743,56 +752,60 @@ def _render_stock_data_insert(api_key: str, found: list[str]) -> None:
                 f"기준 숫자는 1 ~ {MAX_TRADING_DAYS} 사이의 정수로 입력하세요. "
                 f"입력값: '{raw_days}'"
             )
-            return
+        else:
+            with st.status(
+                f"시세 데이터 INSERT 진행 중입니다… (기준 {trading_days}거래일)",
+                expanded=True,
+            ) as status:
+                resolved = _require_project(api_key, found)
+                result: dict = {
+                    "ok": False,
+                    "error": "접속되는 프로젝트 주소가 없습니다",
+                }
+                if resolved:
+                    _, project = resolved
+                    progress_bar = st.progress(0.0, text="시작하는 중…")
+                    log_area = st.empty()
+                    log_lines: list[str] = []
 
-        with st.status(
-            f"시세 데이터 INSERT 진행 중입니다… (기준 {trading_days}거래일)", expanded=True
-        ) as status:
-            resolved = _require_project(api_key, found)
-            result: dict = {"ok": False}
-            if resolved:
-                _, project = resolved
-                progress_bar = st.progress(0.0, text="시작하는 중…")
-                log_area = st.empty()
-                log_lines: list[str] = []
-
-                def on_progress(event: dict) -> None:
-                    progress_bar.progress(
-                        event["processed"] / max(1, event["items"]),
-                        text=(
-                            f"[{event['processed']}/{event['items']}] "
-                            f"{event['stockItem']} {event['stockCode']} "
-                            f"{event['stockName']} ({event['elapsed']}초)"
-                        ),
-                    )
-                    if event["log"]:
-                        log_lines.append(
-                            f"[{event['processed']:>5}/{event['items']}] "
-                            f"성공 {event['ok_items']:>4} · 실패 {event['failed']:>3} → "
-                            f"레코드 {event['records']:>6}건  ({event['elapsed']}초)"
+                    def on_progress(event: dict) -> None:
+                        progress_bar.progress(
+                            event["processed"] / max(1, event["items"]),
+                            text=(
+                                f"[{event['processed']}/{event['items']}] "
+                                f"{event['stockItem']} {event['stockCode']} "
+                                f"{event['stockName']} ({event['elapsed']}초)"
+                            ),
                         )
-                        log_area.code("\n".join(log_lines), language="text")
+                        if event["log"]:
+                            log_lines.append(
+                                f"[{event['processed']:>5}/{event['items']}] "
+                                f"성공 {event['ok_items']:>4} · 실패 {event['failed']:>3} → "
+                                f"레코드 {event['records']:>6}건  ({event['elapsed']}초)"
+                            )
+                            log_area.code("\n".join(log_lines), language="text")
 
-                try:
-                    summary = insert_stock_data(
-                        project,
-                        api_key,
-                        trading_days,
-                        upsert,
-                        clear,
-                        progress=on_progress,
-                    )
-                    result = {"ok": True, "summary": summary}
-                    progress_bar.progress(1.0, text="적재 완료")
-                except Exception as error:  # 원인을 UI에 그대로 노출한다
-                    result = {"ok": False, "error": str(error)}
-                    progress_bar.empty()
+                    try:
+                        summary = insert_stock_data(
+                            project,
+                            api_key,
+                            trading_days,
+                            upsert,
+                            clear,
+                            progress=on_progress,
+                        )
+                        result = {"ok": True, "summary": summary}
+                        progress_bar.progress(1.0, text="적재 완료")
+                    except Exception as error:  # 원인을 UI에 그대로 노출한다
+                        result = {"ok": False, "error": str(error)}
+                        progress_bar.empty()
 
-            status.update(
-                label=f"시세 데이터 INSERT {'완료' if result.get('ok') else '실패'}",
-                state="complete" if result.get("ok") else "error",
-            )
-        st.session_state["adm_stock_data_result"] = result
+                done = bool(result.get("ok"))
+                status.update(
+                    label=f"시세 데이터 INSERT {'완료' if done else '실패'}",
+                    state="complete" if done else "error",
+                )
+            st.session_state["adm_stock_data_result"] = result
 
     if "adm_stock_data_result" in st.session_state:
         _render_stock_data_result(st.session_state["adm_stock_data_result"])

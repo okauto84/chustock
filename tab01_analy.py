@@ -1,4 +1,4 @@
-"""분석 탭: STOCK_DATA(ETF)와 STOCKS를 조인해 이동평균·신고가·시가총액 조건으로 걸러 트리로 보여준다."""
+"""분석 탭: STOCK_DATA(ETF)와 STOCKS를 조인해 이동평균·거래량·신고가·시가총액 조건으로 걸러 트리로 보여준다."""
 
 import itertools
 import json
@@ -34,6 +34,15 @@ MA_FILTERS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# 라벨 -> 거래량(proc) 다음으로 이어서 비교할 거래량 이동평균 키
+PROC_FILTERS: dict[str, tuple[str, ...]] = {
+    "전체": (),
+    ">proc10": ("proc10",),
+    ">proc10>proc20": ("proc10", "proc20"),
+    ">proc10>proc20>proc30": ("proc10", "proc20", "proc30"),
+    ">proc10>proc20>proc30>proc50": ("proc10", "proc20", "proc30", "proc50"),
+}
+
 # 라벨 -> 신고가(top52Value) 대비 허용하는 하락률 상한
 # (top52Value - value) / top52Value 이 이 값 이하면 조건 충족
 TOP52_FILTERS: dict[str, float | None] = {
@@ -58,7 +67,8 @@ MARKET_SUM_FILTERS: dict[str, float | None] = {
     "2조 이상": 20000,
 }
 
-GRID_RATIO = (3, 7)  # 트리(종목) : 구성 종목
+GRID_RATIO = (3, 1, 1, 1, 4)  # 종목 : 시가총액 : 종가 : 52주 신고가 : 구성 종목
+GRID_HEADERS = ("종목", "시가총액", "종가", "52주 신고가", "구성 종목")
 PAGE_ROWS = 30  # 한 분류에 ETF가 수백 개라 나눠 그린다
 
 INDENT_PX = 18  # 한 계층을 들여쓰는 폭
@@ -68,6 +78,7 @@ MAX_DEPTH = 2  # 섹터(0) → 세부 분류(1) → 종목(2)
 ROW_PREFIX = "analytree"  # 컨테이너 key → CSS class(st-key-...) 로 연결선을 그린다
 
 MA_KEY = "analy_ma"
+PROC_KEY = "analy_proc"
 TOP52_KEY = "analy_top52"
 MARKET_SUM_KEY = "analy_market_sum"
 OPEN_KEY = "analy_open_nodes"
@@ -202,7 +213,8 @@ def load_etf_bundle(project: str, api_key: str) -> tuple[str | None, dict, dict,
         api_key,
         STOCK_DATA_TABLE,
         "stockCode,stockItem,date,sectorCode,sectorItem,value,proc,kospi,"
-        "rs20,rs50,ma10,ma20,ma30,ma50,ma100,ma150,top52Value,marketSum",
+        "rs20,rs50,ma10,ma20,ma30,ma50,ma100,ma150,"
+        "proc10,proc20,proc30,proc50,top52Value,marketSum",
         filters={"stockItem": "eq.ETF", "date": f"eq.{as_of}"},
         order="stockCode",
     )
@@ -268,6 +280,7 @@ def build_holder_index(etfs: dict[str, dict]) -> dict[str, list[str]]:
 def passes_filters(
     record: dict | None,
     ma_keys: tuple[str, ...],
+    proc_keys: tuple[str, ...],
     top52_ratio: float | None,
     market_sum_min: float | None,
 ) -> bool:
@@ -294,6 +307,18 @@ def passes_filters(
         if any(upper <= lower for upper, lower in zip(chain, chain[1:])):
             return False
 
+    if proc_keys:
+        proc = record.get("proc") or 0.0
+        if proc <= 0:
+            return False
+        averages = [record.get(key) or 0.0 for key in proc_keys]
+        # 거래량 이동평균이 없는 종목(0)은 비교 대상에서 뺀다
+        if any(average <= 0 for average in averages):
+            return False
+        chain = [proc, *averages]
+        if any(upper <= lower for upper, lower in zip(chain, chain[1:])):
+            return False
+
     if top52_ratio is not None:
         top52 = record.get("top52Value") or 0.0
         if top52 <= 0:
@@ -309,6 +334,7 @@ def filter_tree(
     categories: dict[str, dict[str, list[str]]],
     values: dict[str, dict],
     ma_keys: tuple[str, ...],
+    proc_keys: tuple[str, ...],
     top52_ratio: float | None,
     market_sum_min: float | None,
 ) -> dict[str, dict[str, list[str]]]:
@@ -321,7 +347,11 @@ def filter_tree(
                 itemcode
                 for itemcode in itemcodes
                 if passes_filters(
-                    values.get(itemcode), ma_keys, top52_ratio, market_sum_min
+                    values.get(itemcode),
+                    ma_keys,
+                    proc_keys,
+                    top52_ratio,
+                    market_sum_min,
                 )
             ]
             if kept:
@@ -500,9 +530,26 @@ def _tree_rows(
     return rows
 
 
+def _fmt_market_sum(value: float | int | None) -> str:
+    """시가총액(억원)을 화면용 문자열로 만든다."""
+    if value in (None, "", 0, 0.0):
+        return "-"
+    amount = float(value)
+    if amount >= 10000:
+        return f"{amount / 10000:,.1f}조"
+    return f"{amount:,.0f}억"
+
+
+def _fmt_price(value: float | int | None) -> str:
+    """종가·신고가 숫자를 화면용 문자열로 만든다."""
+    if value in (None, "", 0, 0.0):
+        return "-"
+    return f"{float(value):,.0f}"
+
+
 def _render_branch(row: dict, opened: set[str]) -> None:
     """섹터·세부 분류 행: 접고 펴는 네모 아이콘과 이름을 그린다."""
-    tree_col, _ = st.columns(GRID_RATIO, vertical_alignment="center")
+    tree_col, *_ = st.columns(GRID_RATIO, vertical_alignment="center")
     with tree_col:
         is_open = row["node"] in opened
         st.button(
@@ -522,7 +569,7 @@ def _render_branch(row: dict, opened: set[str]) -> None:
 
 def _render_more(row: dict) -> None:
     """한 분류에서 아직 못 그린 종목을 더 불러오는 행."""
-    tree_col, _ = st.columns(GRID_RATIO, vertical_alignment="center")
+    tree_col, *_ = st.columns(GRID_RATIO, vertical_alignment="center")
     with tree_col:
         st.button(
             f"남은 {row['remaining']}종목 중 {min(row['remaining'], PAGE_ROWS)}개 더 보기",
@@ -536,18 +583,23 @@ def _render_more(row: dict) -> None:
 
 
 def _render_leaf(itemcode: str, item: dict, record: dict | None) -> None:
-    """ETF 한 종목: 왼쪽은 종목명, 오른쪽은 구성 종목 박스."""
-    tree_col, holdings_col = st.columns(GRID_RATIO, vertical_alignment="center")
+    """ETF 한 종목: 종목·시가총액·종가·신고가·구성 종목을 한 행에 그린다."""
+    tree_col, market_col, value_col, top52_col, holdings_col = st.columns(
+        GRID_RATIO, vertical_alignment="center"
+    )
     with tree_col:
         itemname = item.get("stockName") or item.get("itemname") or itemcode
-        detail = itemcode
-        if record:
-            detail = f"{itemcode} · {record.get('date', '')} 종가 {record.get('value', 0):,.0f}"
         st.markdown(
             f":material/description: {itemname}"
-            f" <span style='color:#868e96'>{detail}</span>",
+            f" <span style='color:#868e96'>{itemcode}</span>",
             unsafe_allow_html=True,
         )
+    with market_col:
+        st.markdown(_fmt_market_sum(record.get("marketSum") if record else None))
+    with value_col:
+        st.markdown(_fmt_price(record.get("value") if record else None))
+    with top52_col:
+        st.markdown(_fmt_price(record.get("top52Value") if record else None))
     with holdings_col:
         holdings = [
             str(name) for name in (item.get("stockItems") or item.get("itemlist") or [])
@@ -577,8 +629,8 @@ def _render_tree(
     st.markdown(TREE_CSS, unsafe_allow_html=True)
     with st.container(key=f"{ROW_PREFIX}-header", gap=0):
         header_cols = st.columns(GRID_RATIO, gap="small")
-        header_cols[0].markdown("**종목**")
-        header_cols[1].markdown("**구성 종목**")
+        for col, title in zip(header_cols, GRID_HEADERS):
+            col.markdown(f"**{title}**")
 
     if not tree:
         st.info("조건을 만족하는 종목이 없습니다.")
@@ -649,14 +701,23 @@ def show() -> None:
         st.error(f"ETF 데이터 조회 실패 — {load_error}")
         return
 
-    ma_col, market_col, top52_col, button_col = st.columns(
-        [3, 2, 2, 1], vertical_alignment="bottom"
+    ma_col, proc_col, market_col, top52_col, button_col = st.columns(
+        [3, 3, 2, 2, 1], vertical_alignment="bottom"
     )
     with ma_col:
         ma_label = st.selectbox(
             "이동평균선",
             list(MA_FILTERS),
             key=MA_KEY,
+            accept_new_options=False,
+            filter_mode=None,
+            persist_state="session",
+        )
+    with proc_col:
+        proc_label = st.selectbox(
+            "거래량 이동평균",
+            list(PROC_FILTERS),
+            key=PROC_KEY,
             accept_new_options=False,
             filter_mode=None,
             persist_state="session",
@@ -697,6 +758,7 @@ def show() -> None:
         categories,
         values,
         MA_FILTERS[ma_label],
+        PROC_FILTERS[proc_label],
         TOP52_FILTERS[top52_label],
         MARKET_SUM_FILTERS[market_label],
     )
@@ -707,7 +769,8 @@ def show() -> None:
     st.caption(
         f"기준일 {as_of_text} · STOCK_DATA(ETF) ⨝ STOCKS · "
         f"{secret_name or 'Supabase'} · 이동평균선 {ma_label} · "
-        f"신고가 비율 {top52_label} · 시가총액 {market_label} → {matched}/{total}종목"
+        f"거래량 이동평균 {proc_label} · 신고가 비율 {top52_label} · "
+        f"시가총액 {market_label} → {matched}/{total}종목"
     )
 
     with st.container(border=True, gap=0):
